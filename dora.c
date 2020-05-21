@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <linux/if.h>
@@ -37,15 +38,19 @@ Usage:\n\
     dora [options] interface\n\
 \n\
 Perform a DHCP Discover-Offer-Request-Acknowledge transaction on specified\n\
-interface and print the results in parseable form. The invoking code is\n\
-expected to actually assign the obtained address to the interface.\n\
+interface and print the result to stdout. The invoking code is expected to\n\
+actually assign the obtained address, track the lease, etc.\n\
 \n\
 Options are:\n\
 \n\
-    -i 'hostid'     - use the specified string as the host ID, instead of 'dora'\n\
-    -n              - perform the discovery and print the offer, but don't actually request the address from the server\n\
-    -t seconds      - timeout after specified seconds, default is 5\n\
-    -v              - spew lots of verbosity\n\
+    -a address      - request the specified address (which the server may freely ignore)\n\
+    -l              - release the address specified by -a\n\
+    -n              - perform the discovery but don't actually request the address from the server\n\
+    -o code         - request specified DHCP option, can be used multple times, implies -x\n\
+    -r              - just try to renew the address specified by -a\n\
+    -t seconds      - timeout after specified seconds without a response (default is 5)\n\
+    -v              - dump lots of transaction info to stderr\n\
+    -x              - print all received options, one per line\n\
 ")
 
 #define BOOTPC 68
@@ -66,7 +71,7 @@ void dump(uint8_t *p, int count)
     if (ofs % DUMP) warn("\n");
 }
 
-// Return current monotonic milliseconds since boot
+// Return monotonic milliseconds since boot, wraps after 49 days!
 uint32_t mS(void)
 {
     struct timespec t;
@@ -74,8 +79,8 @@ uint32_t mS(void)
     return ((uint32_t)t.tv_sec*1000) + (t.tv_nsec/1000000);
 }
 
-// DHCP/BOOTP packet, see https://en.wikipedia.org/wiki/Dynamic_Host_Configuration_Protocol and RFC951.
-// Legacy fields are sent as zeros, and ignored in reply.
+// DHCP/BOOTP packet, see https://en.wikipedia.org/wiki/Dynamic_Host_Configuration_Protocol.
+// Legacy fields are zero in transmitted packets, and ignored in recceived packets
 struct dhcp
 {
     uint8_t op;             // 1 == request to server, 2 == reply from server
@@ -84,7 +89,7 @@ struct dhcp
     uint8_t hops;           // legacy "optionally used in cross-gateway booting"
     uint32_t xid;           // transaction ID, a random number
     uint16_t secs;          // legacy: seconds elased since client started trying to boot
-    uint16_t flags;         // unused
+    uint16_t flags;         // legacy: unused
     uint32_t ciaddr;        // legacy: client IP address
     uint32_t yiaddr;        // "your" IP address, filled in by server
     uint32_t siaddr;        // server IP address, filled in by server
@@ -127,14 +132,16 @@ int main(int argc, char *argv[])
     char *hostid = "dora";
     bool request = true;
     int timeout = 5;
+    bool extended = false;
     uint8_t mac[6];
 
-    while (1) switch (getopt(argc, argv, ":i:nt:v"))
+    while (1) switch (getopt(argc, argv, ":i:nt:vx"))
     {
         case 'i': hostid=optarg; break;
         case 'n': request=false; break;
         case 't': timeout = atoi(optarg); break;
         case 'v': verbose = true; break;
+        case 'x': extended = true; break;
 
         case ':':            // missing
         case '?': usage();   // or invalid options
@@ -213,13 +220,13 @@ int main(int argc, char *argv[])
 
     struct dhcp *offer = NULL;
     int remaining = timeout*1000;
-    uint32_t from;
+    uint32_t from, server;
     int got;
 
     while(1)
     {
         debug("Waiting %d mS for response\n", remaining);
-        uint32_t f;
+        uint8_t response_type;
         got = await(sock, &offer, &remaining, &from);
         if (!got) die("No response from server\n");
         if (verbose)
@@ -230,16 +237,26 @@ int main(int argc, char *argv[])
             dump((uint8_t *)offer, got);
         }
         // validate offer
-        if (got < sizeof(struct dhcp)+1)
+        if (got < sizeof(struct dhcp)+2)
             debug("Offer is too short\n");
+        else if (offer->op != 2)
+            debug("Offer has wrong op\n");
+        else if (offer->htype != 1)
+            debug("Offer has wrong htype\n");
+        else if (offer->hlen != 6)
+            debug("Offer has wrong hlen\n");
         else if (ntohl(offer->xid) != xid)
             debug("Offer has wrong XID\n");
+        else if (memcmp(&discover->chaddr, &offer->chaddr, sizeof(offer->chaddr)))
+            debug("Offer has wrong chaddr\n");
         else if (ntohl(offer->cookie) != COOKIE)
             debug("Offer has invalid cookie\n");
-        else if (!offer->yiaddr)
-            debug("Offer does not provide an IP address\n");
-        else if (checkopts((uint8_t *)&offer->options, got-sizeof(struct dhcp), verbose) != 2)
+        else if (check_options((uint8_t *)&offer->options, got-sizeof(struct dhcp), &server, &response_type, verbose))
             debug("Offer options are invalid\n");
+        else if (response_type != 2)
+            debug("Offer has wrong response type %d\n", response_type);
+        else if (!offer->yiaddr)
+            debug("Offer does not specify an IP\n");
         else
             // good to go!
             break;
@@ -248,10 +265,35 @@ int main(int argc, char *argv[])
         free(offer);
     }
 
-    char s[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &offer->yiaddr, s, INET_ADDRSTRLEN);
-    printf("Address: %s\n", s);
-    printopts((uint8_t *)&offer->options, got-sizeof(struct dhcp));
+    char address[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &offer->yiaddr, address, INET_ADDRSTRLEN);
+
+    if (extended)
+    {
+
+        printf("0 Address: %s\n", address); // present as phony option code 0
+        print_options((uint8_t *)&offer->options, got-sizeof(struct dhcp));
+
+        char *server = get_option(54, (uint8_t *)&offer->options, got-sizeof(struct dhcp), false);
+        if (!server)
+        {
+            // no server identifier, synthesize one
+            if (offer->siaddr)
+            {
+                inet_ntop(AF_INET, &offer->siaddr, server, INET_ADDRSTRLEN);
+                printf("54 Server identifier from siaddr: %s\n", server);
+            } else
+                printf("54 Server identifier from IP: %s\n", from);
+        }
+    } else
+    {
+        char *subnet = get_option(1, (uint8_t *)&offer->options, got-sizeof(struct dhcp), false);
+        char *router = get_option(3, (uint8_t *)&offer->options, got-sizeof(struct dhcp), false);
+        char *dhcp = get_option(6, (uint8_t *)&offer->options, got-sizeof(struct dhcp), false);
+        char *lease = get_option(51, (uint8_t *)&offer->options, got-sizeof(struct dhcp), false);
+        char *domain = get_option(15, (uint8_t *)&offer->options, got-sizeof(struct dhcp), false);
+        printf("%s %s %s %s %s %s\n", address, subnet?:"255.255.255.0", dhcp?:"0.0.0.0", lease?:"600", domain?:"localdomain");
+    }
 
     return 0;
 }

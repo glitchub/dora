@@ -1,5 +1,8 @@
 // RFC 2132 DHCP options parsing
+#define _GNU_SOURCE
 #include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
 #include <stdbool.h>
 #include <arpa/inet.h>
 
@@ -105,11 +108,17 @@ static struct
 };
 #define NUMOPTS 77
 
-// validate dhcp options and return DHCP message type if found, 0 if not found, -1 if error
-int checkopts(uint8_t *opts, int size, bool verbose)
+// Validate dhcp options and return 0, or -1 if invalid.
+// If response_type is not NULL, fill with option 53 dhcp message type if supplied, or 0.
+// If server is not NULL, fill with option 54 server idenfitier if supplied, or 0.
+// If verbose, write various errors to stderr.
+int check_options(uint8_t *opts, int size, uint32_t *server, uint8_t *response_type, bool verbose)
 {
     int type = 0;
     uint8_t *end = opts + size;
+
+    if (server) *server = 0;
+    if (response_type) *response_type = 0;
 
     while (opts < end)
     {
@@ -134,7 +143,7 @@ int checkopts(uint8_t *opts, int size, bool verbose)
         }
         if (code >= NUMOPTS || !options[code].type)
         {
-            debug("Ignoring unknown code %d\n", code);
+            debug("Ignoring unknown option %d\n", code);
         }
         else switch(options[code].type)
         {
@@ -183,23 +192,24 @@ int checkopts(uint8_t *opts, int size, bool verbose)
                 }
                 break;
         }
-        // extract DHCP response type
-        if (code == 53) type = *opts;
+        // extract fields of interest
+        if (response_type && code == 53) *response_type = *opts;
+        if (server && code == 54) *server = *(uint32_t *)opts;
         opts += len;
     }
-    // done, return extracted type
-    return type;
+    // success
+    return 0;
 }
 
 // Print dhcp options to stdout, assumes you already validated with checkopts().
-void printopts(uint8_t *opts, int size)
+void print_options(uint8_t *opts, int size)
 {
     uint8_t *end = opts + size;
     while (opts < end)
     {
         uint8_t code = *opts++;             // get the option code
         if (code == 0) continue;            // ignore 0
-        if (code == 255) return;            // done if 255
+        if (code == 255) break;             // done if 255
         uint8_t len = *opts++;              // get packet length
         if (code < NUMOPTS && options[code].name)
         {
@@ -212,7 +222,8 @@ void printopts(uint8_t *opts, int size)
 
                 case opt_16:
                 case opt_16s:
-                    for (int i=0; i < len; i+=2) printf("%d ", ntohs(*(uint16_t *)(opts+i)));
+                    printf("%d", ntohs(*(uint16_t *)opts));
+                    for (int i=2; i < len; i+=2) printf(" %d", ntohs(*(uint16_t *)(opts+i)));
                     break;
 
                 case opt_32:
@@ -229,26 +240,17 @@ void printopts(uint8_t *opts, int size)
 
                 case opt_IP:
                 case opt_IPs:
-                    for (int i=0; i<len; i+=4)
-                    {
-                        char s[INET_ADDRSTRLEN];
-                        inet_ntop(AF_INET, opts, s, INET_ADDRSTRLEN);
-                        printf("%s ", s);
-                    }
+                    printf("%d.%d.%d.%d", opts[0], opts[1], opts[2], opts[3]);
+                    for (int i=4; i<len; i+=4) printf(" %d.%d.%d.%d", opts[i+0], opts[i+1], opts[i+2], opts[i+3]);
                     break;
 
                 case opt_IPmasks:
-                    for (int i=0; i<len; i+=8)
-                    {
-                        char s[INET_ADDRSTRLEN];
-                        inet_ntop(AF_INET, opts, s, INET_ADDRSTRLEN);
-                        printf("%s/", s);
-                        inet_ntop(AF_INET, opts+4, s, INET_ADDRSTRLEN);
-                        printf("%s ", s);
-                    }
+                    printf("%d.%d.%d.%d/%d.%d.%d.%d", opts[0], opts[1], opts[2], opts[3], opts[4], opts[5], opts[6], opts[7]);
+                    for (int i=8; i<len; i+=8) printf(" %d.%d.%d.%d/%d.%d.%d.%d", opts[i+0], opts[i+1], opts[i+2], opts[i+3], opts[i+4], opts[i+5], opts[i+6], opts[i+7]);
                     break;
-                case opt_hex:
-                    for (int i=0; i<len; i++) printf("%02X", *(opts+i));
+
+                default: // opt_hex
+                    for (int i=0; i<len; i++) printf("%02X", opts[i]);
                     break;
 
             }
@@ -256,4 +258,92 @@ void printopts(uint8_t *opts, int size)
         }
         opts += len;
     }
+}
+
+// Return a string containing specified option value, or NULL if option not found.
+// Options with multiple values will only return the first unless multi is true.
+// Assumes the options have first been validated by checkopts.
+char *get_option(uint8_t option, uint8_t *opts, int size, bool multi)
+{
+    uint8_t *end = opts + size;
+    while (opts < end)
+    {
+        uint8_t code = *opts++;             // get the option code
+        if (code == 0) continue;            // ignore 0
+        if (code == 255) break;             // done if 255
+        uint8_t len = *opts++;              // get packet length
+        if (code != option)
+        {
+            opts += len;
+            continue;
+        }
+        // found the desired option, create a string and return it
+        switch(options[code].type) // parse code
+        {
+            case opt_8:
+            {
+                char *s;
+                asprintf(&s, "%d", *opts);
+                return s;
+            }
+
+            case opt_16:
+            case opt_16s:
+            {
+                char *p = calloc(len, 4);
+                char *s = p + sprintf(p, "%d", ntohs(*(uint16_t *)(opts)));
+                if (multi) for (int i=2; i < len; i+=2) s += sprintf(s, " %d", ntohs(*(uint16_t *)(opts+i)));
+                return p;
+            }
+
+            case opt_32:
+            {
+                char *s;
+                asprintf(&s, "%d", ntohl(*(uint32_t *)(opts)));
+                return s;
+            }
+
+            case opt_str:
+            {
+                char *s;
+                asprintf(&s, "%.*s", len, (char *)opts);
+                return s;
+            }
+
+            case opt_bool:
+            {
+                char *s;
+                asprintf(&s, "%s", *opts ? "true" : "false");
+                return s;
+            }
+
+            case opt_IP:
+            case opt_IPs:
+            {
+                char *p = calloc(len, 16);
+                char *s = p + sprintf(p, "%d.%d.%d.%d", opts[0], opts[1], opts[2], opts[3]);
+                if (multi) for (int i=4; i<len; i+=4) s += sprintf(s, " %d.%d.%d.%d ", opts[i], opts[i+1], opts[i+2], opts[i+3]);
+                return p;
+            }
+
+            case opt_IPmasks:
+            {
+                char *p = calloc(len, 32);
+                char *s = p + sprintf(p, "%d.%d.%d.%d/%d.%d.%d.%d", opts[0], opts[1], opts[2], opts[3], opts[4], opts[5], opts[6], opts[7]);
+                if (multi)
+                    for (int i=8; i<len; i+=8) s += sprintf(s, " %d.%d.%d.%d/%d.%d.%d.%d", opts[i+0], opts[i+1], opts[i+2], opts[i+3], opts[i+4], opts[i+5], opts[i+6], opts[i+7]);
+                return p;
+            }
+
+            default: // opt_hex
+            {
+                char *p = calloc(len, 2);
+                char *s = p;
+                for (int i=0; i<len; i++) s += sprintf(s, "%02X", *(opts+i));
+                return p;
+            }
+        }
+    }
+    // option not found
+    return NULL;
 }
