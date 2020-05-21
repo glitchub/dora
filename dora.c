@@ -86,18 +86,18 @@ struct dhcp
     uint8_t op;             // 1 == request to server, 2 == reply from server
     uint8_t htype;          // 1 == ethernet
     uint8_t hlen;           // 6 == mac address length
-    uint8_t hops;           // legacy "optionally used in cross-gateway booting"
+    uint8_t hops;           // legacy: used in cross-gateway booting
     uint32_t xid;           // transaction ID, a random number
     uint16_t secs;          // legacy: seconds elased since client started trying to boot
     uint16_t flags;         // legacy: unused
-    uint32_t ciaddr;        // legacy: client IP address
+    uint32_t ciaddr;        // client IP address, filled in by client if requesting an address
     uint32_t yiaddr;        // "your" IP address, filled in by server
     uint32_t siaddr;        // server IP address, filled in by server
     uint32_t giaddr;        // legacy: filled in by cross-gateway booting
     uint8_t chaddr[16];     // client hardware address (aka ethernet mac address)
     uint8_t legacy[192];    // legacy: server host name and file name
     uint32_t cookie;        // magic cookie 0x63825363 indicating DHCP options to follow
-    uint8_t options[0];     // variable length DHCP options
+    uint8_t options[];      // variable length options
 };
 
 // Wait for udp response up to 4096 bytes with timeout in milliseconds. On
@@ -120,7 +120,7 @@ int await(int sock, struct dhcp **response, int *timeout, uint32_t *from)
     expect(res == 1 && pfd.revents & POLLIN);
     *timeout -= mS() - start; // subtract elapsed time
     struct sockaddr_in fsock;
-    int flen = sizeof(struct sockaddr_in);
+    socklen_t flen = sizeof(struct sockaddr_in);
     int got = recvfrom(sock, *response, 4096, 0, (struct sockaddr *)&fsock, &flen);
     expect(got > 0 && flen == sizeof(struct sockaddr_in));
     if (from) *from = fsock.sin_addr.s_addr;
@@ -135,10 +135,12 @@ int main(int argc, char *argv[])
     bool extended = false;
     uint8_t mac[6];
 
+    (void) hostid;
+
     while (1) switch (getopt(argc, argv, ":i:nt:vx"))
     {
         case 'i': hostid=optarg; break;
-        case 'n': request=false; break;
+        case 'n': request = false; break;
         case 't': timeout = atoi(optarg); break;
         case 'v': verbose = true; break;
         case 'x': extended = true; break;
@@ -194,7 +196,7 @@ int main(int argc, char *argv[])
     uint8_t discover_options[] =
     {
         0x35, 0x01, 0x01,                           // dhcp message type 1 = discover
-        0x37, 0x05, 0x01, 0x03, 0x06, 0x0C, 0x0F,   // request mask, router, domain name, hostname, name server
+        0x37, 0x05, 0x01, 0x03, 0x06, 0x0F,         // request mask, router, domain name, name server
         0x61, 0x04, 'd', 'o', 'r', 'a',             // host ID
         0xFF                                        // end of options
     };
@@ -220,13 +222,13 @@ int main(int argc, char *argv[])
 
     struct dhcp *offer = NULL;
     int remaining = timeout*1000;
-    uint32_t from, server;
+    uint32_t from;
     int got;
 
     while(1)
     {
         debug("Waiting %d mS for response\n", remaining);
-        uint8_t response_type;
+        int response_type;
         got = await(sock, &offer, &remaining, &from);
         if (!got) die("No response from server\n");
         if (verbose)
@@ -251,7 +253,7 @@ int main(int argc, char *argv[])
             debug("Offer has wrong chaddr\n");
         else if (ntohl(offer->cookie) != COOKIE)
             debug("Offer has invalid cookie\n");
-        else if (check_options((uint8_t *)&offer->options, got-sizeof(struct dhcp), &server, &response_type, verbose))
+        else if ((response_type = check_options((uint8_t *)&offer->options, got-sizeof(struct dhcp), verbose)) < 0)
             debug("Offer options are invalid\n");
         else if (response_type != 2)
             debug("Offer has wrong response type %d\n", response_type);
@@ -268,31 +270,41 @@ int main(int argc, char *argv[])
     char address[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &offer->yiaddr, address, INET_ADDRSTRLEN);
 
+    if (request)
+    {
+        warn("Request not implented\n");
+    } else
+    {
+        warn("Warning, address not requested and not authoritative\n");
+    }
+
+    char *subnet, *router, *dns, *lease, *domain;
+    get_option(1, (uint8_t *)&offer->options, got-sizeof(struct dhcp), &subnet, false);
+    get_option(3, (uint8_t *)&offer->options, got-sizeof(struct dhcp), &router, false);
+    get_option(6, (uint8_t *)&offer->options, got-sizeof(struct dhcp), &dns, false);
+    get_option(51, (uint8_t *)&offer->options, got-sizeof(struct dhcp), &lease, false);
+    get_option(15, (uint8_t *)&offer->options, got-sizeof(struct dhcp), &domain, false);
+    printf("%s %s %s %s %s %s\n", address, subnet?:"255.255.255.0", router?:"0.0.0.0", dns?:router?:"0.0.0.0", lease?:"600", domain?:"localdomain");
     if (extended)
     {
 
         printf("0 Address: %s\n", address); // present as phony option code 0
         print_options((uint8_t *)&offer->options, got-sizeof(struct dhcp));
 
-        char *server = get_option(54, (uint8_t *)&offer->options, got-sizeof(struct dhcp), false);
-        if (!server)
+        if (get_option(54, (uint8_t *)&offer->options, got-sizeof(struct dhcp), NULL, false) < 0)
         {
             // no server identifier, synthesize one
+            char server[INET_ADDRSTRLEN];
             if (offer->siaddr)
             {
                 inet_ntop(AF_INET, &offer->siaddr, server, INET_ADDRSTRLEN);
-                printf("54 Server identifier from siaddr: %s\n", server);
+                printf("54 Server identifier (from SIADDR): %s\n", server);
             } else
-                printf("54 Server identifier from IP: %s\n", from);
+            {
+                inet_ntop(AF_INET, &from, server, INET_ADDRSTRLEN);
+                printf("54 Server identifier (from IP): %s\n", server);
+            }
         }
-    } else
-    {
-        char *subnet = get_option(1, (uint8_t *)&offer->options, got-sizeof(struct dhcp), false);
-        char *router = get_option(3, (uint8_t *)&offer->options, got-sizeof(struct dhcp), false);
-        char *dhcp = get_option(6, (uint8_t *)&offer->options, got-sizeof(struct dhcp), false);
-        char *lease = get_option(51, (uint8_t *)&offer->options, got-sizeof(struct dhcp), false);
-        char *domain = get_option(15, (uint8_t *)&offer->options, got-sizeof(struct dhcp), false);
-        printf("%s %s %s %s %s %s\n", address, subnet?:"255.255.255.0", dhcp?:"0.0.0.0", lease?:"600", domain?:"localdomain");
     }
 
     return 0;

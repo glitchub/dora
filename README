@@ -1,0 +1,46 @@
+dora is a stand alone dhcp client and test tool. It communicates with the dhcp
+server but does not resident, assign addresses or manage leases.
+
+Without options, other than an interface name, dora will broadcast a DHCP
+discover and wait for an offer. dora broadcasts a DHCP request for the first
+valid offer, and waits for an acknowledge. Finally dora prints a single line to
+stdout, in the form:
+
+    address netmask gateway dhcp domain server lease
+
+For example:
+
+    192.168.1.117 255.255.255.254 192.168.0.1 8.8.8.8 localdomain 192.168.1.254 86400
+
+The invoking program may uses this information to configure the interface and
+/etc/resolv.conf. The invoking program can also keep track of the lease time
+and re-invoke dora to renew when 50% of the time has expired.
+
+dora supports the following options:
+
+    -a address  - include the address as option 50 in the discovery packet, a
+    server may choose to offer this address.
+
+    -s server   - unicast messages to the specified server address instead of
+    broadcasting.
+
+    -t seconds  - seconds to wait for responses, default is 3.
+
+    -r retries  - number of times to retry discovery before giving up, default
+    is 4 (i.e. 12 seconds total, by default).
+
+    -n          - send one dicovery and print all offers. Do not request the
+    address. This is for testing, identifying bogus DHCP servers, etc.
+
+    -R          - issue a DHCP renew message instead of discovery. Must specify
+    the address with -a. -s may be required in the case where there is more
+    than one dhcp server, otherwise the wrong server may NAK the renewal.
+
+    -x          - in addition to the out above, also report one DHCP option per
+    line in the form:
+
+        code arbitrary text: value
+
+    For example:
+
+        28 Broadcast address: 192.168.1.255
