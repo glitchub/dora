@@ -299,6 +299,7 @@ void print_options(uint8_t *opts, int size)
 uint8_t *get_option(uint8_t option, uint8_t *opts, int size, char **value, bool multi)
 {
     if (option < 1 || option >= NUMOPTS) return NULL;
+    if (value) *value = NULL;
 
     uint8_t *end = opts + size;
     while (opts < end)
