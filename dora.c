@@ -1,3 +1,4 @@
+#define _GNU_SOURCE // for asprintf()
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -45,14 +46,15 @@ actually assign the obtained address, track the lease, etc.\n\
 \n\
 Options are:\n\
 \n\
-    -a address      - request the specified address (which the server may freely ignore)\n\
-    -l              - release the address specified by -a\n\
+    -c address      - request the specified client address (which the server may freely ignore)\n\
+    -l              - send a DHCPRELEASE, requires -c\n\
     -n              - perform the discovery but don't actually request the address from the server\n\
     -o code         - request specified DHCP option, can be used multple times, implies -x\n\
+    -O              - request all 254 possible DHCP options, implies -x\n\
     -r              - just try to renew the address specified by -a\n\
     -t seconds      - timeout after specified seconds without a response (default is 5)\n\
     -v              - dump lots of transaction info to stderr\n\
-    -x              - print all received options, one per line\n\
+    -x              - print received options, one per line\n\
 ")
 
 #define BOOTPC 68
@@ -89,17 +91,26 @@ uint32_t rand32(void)
     return r;
 }
 
-// Convert network order uin32_t to IP address string, return pointerm caller must free it
-char *ipstr(uint32_t addr)
+// Given network order uin32_t, return dotted quad address string, caller must free it
+char *ipntos(uint32_t addr)
 {
+    uint32_t a = ntohl(addr);
     char *s;
-    expect(s=malloc(INET_ADDRSTRLEN));
-    inet_ntop(AF_INET, &addr, s, INET_ADDRSTRLEN);
+    expect(asprintf(&s, "%u.%u.%u.%u", (a>>24) & 255, (a>>16) & 255, (a>>8) & 255, a & 255) >= 7);
     return s;
 }
 
+// Given dotted quad address string return network order uint32_t or 0 if string is invalid.
+uint32_t ipston(char *s)
+{
+    int a,b,c,d;
+    char j;
+    if (sscanf(s, "%u.%u.%u.%u%c", &a, &b, &c, &d, &j) != 4 || (a|b|c|d) > 255) return 0;
+    return htonl(a<<24|b<<16|c<<8|d);
+}
+
 // DHCP packet and metadata
-typedef struct
+struct packet
 {
     int optsize;                // Size of dhcp options appended to packet
     int type;                   // The DHCP message type
@@ -122,22 +133,22 @@ typedef struct
         uint32_t cookie;        // magic cookie 0x63825363 indicates DHCP options to follow
         uint8_t options[];      // options are variable length
     } dhcp;
-} packet;
+};
 
 // size of the packet dhcp struct
-//#define DHCP_SIZE (sizeof((packet *)NULL)->dhcp)
+//#define DHCP_SIZE (sizeof((struct packet *)NULL)->dhcp)
 #define DHCP_SIZE 240
 
 // Send request packet to specified address if non-zero, then wait for valid response. Timeout is in
 // milliseconds. If received, point *response at the malloced packet and return remaining timeout >= 0.
 // If timeout, return -1.
-int transact(int sock, uint32_t to, packet *request, packet **response, int timeout)
+int transact(int sock, uint32_t to, struct packet *request, struct packet **response, int timeout)
 {
     if (to)
     {
         if (verbose)
         {
-            char *s = ipstr(to);
+            char *s = ipntos(to);
             warn("Sending %d byte packet to %s:\n", DHCP_SIZE+request->optsize, s);
             dump((uint8_t *)&request->dhcp, DHCP_SIZE+request->optsize);
             free(s);
@@ -151,8 +162,8 @@ int transact(int sock, uint32_t to, packet *request, packet **response, int time
         expect(sendto(sock, &request->dhcp, DHCP_SIZE+request->optsize, 0, (struct sockaddr *)&tosock, sizeof(tosock)) == DHCP_SIZE+request->optsize);
     }
 
-    packet *p;
-    expect(p = malloc(sizeof(packet)+1024));
+    struct packet *p;
+    expect(p = malloc(sizeof(struct packet)+1024));
 
     while (timeout > 0)
     {
@@ -170,7 +181,7 @@ int transact(int sock, uint32_t to, packet *request, packet **response, int time
         p->from = fromsock.sin_addr.s_addr;
         if (verbose)
         {
-            char *s = ipstr(p->from);
+            char *s = ipntos(p->from);
             warn("Received %d byte packet from %s:\n", size, s);
             free(s);
             dump((uint8_t *)&p->dhcp, size);
@@ -198,11 +209,11 @@ int transact(int sock, uint32_t to, packet *request, packet **response, int time
     return -1;
 }
 
-void print_packet(packet *p)
+void print_packet(struct packet *p, bool extended)
 {
     // address
-    char *address = ipstr(p->dhcp.yiaddr);
-    debug("Address: %s\n", address);
+    char *address = ipntos(p->dhcp.yiaddr);
+    if (extended) printf("0 Address: %s\n", address);
 
     // subnet mask
     char *subnet;
@@ -213,7 +224,7 @@ void print_packet(packet *p)
         mask = *(uint32_t *)sn;
     else
     {
-        warn("Warning: server did not provide subnet mask, faking it!\n");
+        warn("Warning: server did not provide subnet mask\n");
         switch(ntohl(p->dhcp.yiaddr))
         {
             case 0x10000000 ... 0x10FFFFFF: mask = htonl(0xFF000000); break; // 10.x.x.x -> 255.0.0.0
@@ -221,60 +232,66 @@ void print_packet(packet *p)
             case 0xC0A80000 ... 0xC0A8FFFF: mask = htonl(0xFFFF0000); break; // 192.168.x.x -> 255.255.0.0
             default: mask = 0; break; // meh
         }
-        subnet = ipstr(mask);
+        subnet = ipntos(mask);
+        if (extended) printf("%u ! %s: %s\n", OPT_SUBNET, option_name(OPT_SUBNET), subnet);
     }
-    debug("Subnet: %s\n", subnet);
 
     char *broadcast;
     if (!get_option(OPT_BROADCAST, p->dhcp.options, p->optsize, &broadcast, false))
     {
-        warn("Warning: server did not provide broadcast address, faking it\n");
-        broadcast = ipstr(~mask | (p-> dhcp.yiaddr & mask));
+        warn("Warning: server did not provide broadcast address\n");
+        broadcast = ipntos(~mask | (p-> dhcp.yiaddr & mask));
+        if (extended) printf("%u ! %s: %s\n", OPT_BROADCAST, option_name(OPT_BROADCAST), broadcast);
     }
-    debug("Broadcast: %s\n", broadcast);
 
     char *router;
     if (!get_option(OPT_ROUTER, p->dhcp.options, p->optsize, &router, false))
     {
-        warn("Warning: server did not provide router address, faking it\n");
-        router = ipstr(p->dhcp.siaddr); // iuse the server address
+        warn("Warning: server did not provide router address\n");
+        router = ipntos(p->dhcp.siaddr); // iuse the server address
+        if (extended) printf("%u ! %s: %s\n", OPT_ROUTER, option_name(OPT_ROUTER), router);
     }
-    debug("Router: %s\n", router);
 
     char *dns;
     if (!get_option(OPT_DNS, p->dhcp.options, p->optsize, &dns, false))
     {
-        warn("Warning: server did not provide DNS server address, faking it\n");
+        warn("Warning: server did not provide DNS server address\n");
         dns = router;
+        if (extended) printf("%u ! %s: %s\n", OPT_DNS, option_name(OPT_DNS), dns);
     }
-    debug("DNS: %s\n", dns);
 
     char *domain;
     if (!get_option(OPT_DOMAIN, p->dhcp.options, p->optsize, &domain, false))
     {
-        warn("Warning: server did not provide domain name, faking it\n");
+        warn("Warning: server did not provide domain name\n");
         domain = "localdomain";
+        if (extended) printf("%u ! %s: %s\n", OPT_DOMAIN, option_name(OPT_DOMAIN), domain);
     }
-    debug("Domain: %s\n", domain);
 
-    char *server = ipstr(p->dhcp.siaddr);;
-    debug("Server: %s\n", server);
+    char *server;
+    if (!get_option(OPT_SERVER_ID, p->dhcp.options, p->optsize, &server, false))
+    {
+        warn("Warning: server did not provide server ID\n");
+        server = ipntos(p->dhcp.siaddr);;
+        if (extended) printf("%u ! %s: %s\n", OPT_SERVER_ID, option_name(OPT_SERVER_ID), server);
+    }
 
     char *lease;
     if (!get_option(OPT_LEASE, p->dhcp.options, p->optsize, &lease, false))
     {
-        warn("Warning: server did not provide lease time, faking it\n");
-        lease = "86400";
+        warn("Warning: server did not provide lease time\n");
+        lease = "3600";
+        if (extended) printf("%u ! %s: %s\n", OPT_LEASE, option_name(OPT_LEASE), lease);
     }
-    debug("Lease: %s\n", lease);
 
-    // print one line result
-    printf("%s %s %s %s %s %s %s %s\n", address, subnet, broadcast, router, dns, domain, server, lease);
+    if (extended) print_options(p->dhcp.options, p->optsize);
+    else printf("%s %s %s %s %s %s %s %s\n", address, subnet, broadcast, router, dns, domain, server, lease);
+
 }
 
 // Append data to dhcp options, fail if exceeds 312 bytes (i.e. 768 byte packet for worst-case MTU)
 #define MAXOPTS 312
-void append(packet *p, uint8_t *options, int len)
+void append(struct packet *p, uint8_t *options, int len)
 {
     expect(p->optsize + len <= MAXOPTS);
     while (len--) p->dhcp.options[p->optsize++] = *options++;
@@ -287,9 +304,12 @@ int main(int argc, char *argv[])
     int maxtries = 4;
     bool extended = false;
     uint8_t mac[6];
+    uint32_t ciaddr = 0; // desired client addresst
 
     // Use a bitarray to remember requested dhcp params
-    bitarray *params = bitarray_create(256);
+    bitarray *params = bitarray_create(255); // bits 1- 254 are interesting, 0 does nothing
+
+    // We always want these
     bitarray_set(params, OPT_SUBNET);
     bitarray_set(params, OPT_ROUTER);
     bitarray_set(params, OPT_DNS);
@@ -297,11 +317,13 @@ int main(int argc, char *argv[])
     bitarray_set(params, OPT_BROADCAST);
     bitarray_set(params, OPT_LEASE);
 
-    while (1) switch (getopt(argc, argv, ":i:no:t:vx"))
+    while (1) switch (getopt(argc, argv, ":c:no:Ot:vx"))
     {
         // case 'n': request = false; break;
-        case 'o': expect(!bitarray_set(params, strtoul(optarg, NULL, 0))); break;
-        case 't': expect((timeout = strtoul(optarg, NULL, 0)) > 0); break;
+        case 'c': ciaddr = ipston(optarg); if (!ciaddr) die("Invalid ciaddr for -a\n"); break;
+        case 'o': if (bitarray_set(params, strtoul(optarg, NULL, 0))) die("Invalid option code for -o\n"); extended = true; break;
+        case 'O': for (int n=1; n<255; n++) bitarray_set(params, n); extended = true; break;
+        case 't': if ((timeout = strtoul(optarg, NULL, 0)) <= 0) die("Invalid timeout\n"); break;
         case 'v': verbose = true; break;
         case 'x': extended = true; break;
 
@@ -341,11 +363,12 @@ int main(int argc, char *argv[])
     expect(!bind(sock, (struct sockaddr *)&local, sizeof(local)));
 
     // create discover packet
-    packet *discover = malloc(sizeof(packet)+MAXOPTS);
+    struct packet *discover = malloc(sizeof(struct packet)+MAXOPTS);
     expect(discover);
     discover->optsize = 0;
     discover->from = 0;
     discover->type = 1; // discover
+    discover->dhcp.ciaddr = ciaddr;
     discover->dhcp.op = 0x1;
     discover->dhcp.htype = 0x01;
     discover->dhcp.hlen = 0x06;
@@ -354,23 +377,23 @@ int main(int argc, char *argv[])
     discover->dhcp.xid = rand32();
     discover->dhcp.cookie = htonl(COOKIE);
     // append options
-    append(discover, (uint8_t []){0x35, 1, 1}, 3); // message type 1 == discover
-    append(discover, (uint8_t []){0x61, 7, 1}, 3); // host id is 1 then mac
+    append(discover, (uint8_t []){OPT_DHCP_TYPE, 1, 1}, 3); // message type 1 == discover
+    append(discover, (uint8_t []){OPT_CLIENT_ID, 7, 1}, 3); // client id is 0x01 and the mac
     append(discover, mac, 6);
-    // request options from server
-    append(discover, (uint8_t []){0x37, params->set}, 2);
-    for (int n = bitarray_next(params, 0); n >= 0; n=bitarray_next(params, n+1)) append(discover, (uint8_t []){n}, 1);
-    append(discover, (uint8_t []){0xff}, 1); // ff terminate
+    // request parameters from server
+    append(discover, (uint8_t []){OPT_PARAM_LIST, params->set}, 2);
+    // add codes for set bits 1 to 254
+    for (int n = bitarray_next(params, 1); n > 0; n=bitarray_next(params, n+1)) append(discover, (uint8_t []){n}, 1);
+    append(discover, (uint8_t []){OPT_END}, 1); // this goes last
 
     for(int try = 0; try < maxtries; try++)
     {
-        packet *offer;
+        struct packet *offer;
         int remaining = ((timeout + try) * 1000) + ((rand32() % 2001) - 1000);
         if (transact(sock, 0xFFFFFFFF, discover, &offer, remaining) >= 0)
         {
             // we have a packet, print it
-            print_packet(offer);
-            if (extended) print_options(offer->dhcp.options, offer->optsize);
+            print_packet(offer, extended);
             exit(0);
         }
     }

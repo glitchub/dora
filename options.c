@@ -6,6 +6,8 @@
 #include <stdbool.h>
 #include <arpa/inet.h>
 
+#include "options.h"
+
 // print message to stderr
 #define debug(...) do { if (verbose) fprintf(stderr, __VA_ARGS__); } while(0)
 
@@ -34,7 +36,7 @@ enum {
 // DHCP options, indexed by option code
 static struct
 {
-    char *name; // option name, if NULL the option does not print
+    char *name; // option name
     int type;   // one of the above, if 0 then option is not supported
 } options[] =
 {
@@ -90,7 +92,7 @@ static struct
     [50] = {"Requested IP address", opt_IP},
     [51] = {"IP address lease seconds", opt_u32},
     [52] = {"Option overload", opt_u8},                     // Theoretically does not appear in DHCP responses
-    [53] = {NULL, opt_u8},                                  // DHCP response type, does not print
+    [53] = {"DHCP response type", opt_u8},                  // DHCP response type
     [54] = {"Server identifier", opt_IP},                   // Server's IP address
     [55] = {"Parameter request list", opt_u8s},             // Theoretically does not appear in DHCP responses
     [56] = {"Message", opt_str},                            // Error message from server, in DHCP NAK
@@ -114,6 +116,9 @@ static struct
     [76] = {"StreetTalk Directory Assistance (STDA) server", opt_IPs},
 };
 #define NUMOPTS 77
+
+// true if option code is in the table
+#define known(option) (option < NUMOPTS && options[option].type)
 
 // Return stringified version of typed data of specified length, caller must free it.
 // If the data has multiple values, stringify only the first one unless multi is true
@@ -188,8 +193,8 @@ static char *stringify(uint8_t type, uint8_t *data, uint8_t len, bool multi)
     return p;
 }
 
-// Validate dhcp options and return response type (option 53), or 0 if no type, or -1 if options are invalid.
-// If verbose, write various errors to stderr.
+// Validate dhcp options and return response type (option 53), or 0 if response type not found, or -1 if options are malformed.
+// If verbose, write errors to stderr.
 int check_options(uint8_t *opts, int size, bool verbose)
 {
     uint8_t *end = opts + size;
@@ -198,8 +203,9 @@ int check_options(uint8_t *opts, int size, bool verbose)
     while (opts < end)
     {
         uint8_t code = *opts++;
-        if (code == 0) continue;        // ignore padding
-        if (code == 255) break;         // done of 255
+        if (code == OPT_PAD) continue;  // ignore padding
+        if (code == OPT_END)            // end option, we're done
+            return response_type;
         if (opts >= end)                // at least one more byte?
         {
             debug("Found option %u at end of list\n", code);
@@ -216,11 +222,8 @@ int check_options(uint8_t *opts, int size, bool verbose)
             debug("Option %u length %u exceeds end of list", code, len);
             return -1;
         }
-        if (code >= NUMOPTS || !options[code].type)
-        {
-            debug("Ignoring unknown option %u\n", code);
-        }
-        else switch(options[code].type)
+
+        if (known(code)) switch(options[code].type)
         {
             case opt_8:
             case opt_u8:
@@ -264,12 +267,19 @@ int check_options(uint8_t *opts, int size, bool verbose)
                 break;
         }
         // maybe remember response type
-        if (code == 53) response_type = *opts;
+        if (code == OPT_DHCP_TYPE) response_type = *opts;
+
         // advance to next
         opts += len;
     }
-    // success
-    return response_type;
+    debug("Option 255 not found\n");
+    return -1;
+}
+
+// Just return option name or "Unknown option"
+char *option_name(uint8_t code)
+{
+    return known(code) ? options[code].name : "Unknown option";
 }
 
 // Print dhcp options to stdout, assumes they are already validated.
@@ -279,15 +289,12 @@ void print_options(uint8_t *opts, int size)
     while (opts < end)
     {
         uint8_t code = *opts++;             // get the option code
-        if (code == 0) continue;            // ignore 0
-        if (code == 255) break;             // done if 255
+        if (code == OPT_PAD) continue;      // ignore padding
+        if (code == OPT_END) break;         // done
         uint8_t len = *opts++;              // get packet length
-        if (code < NUMOPTS && options[code].name)
-        {
-            char *s = stringify(options[code].type, opts, len, true);
-            printf("%u %s: %s\n",code, options[code].name, s);
-            free(s);
-        }
+        char *s = stringify(known(code) ? options[code].type : opt_u8s, opts, len, true); // just report raw bytes
+        printf("%u %s: %s\n", code, option_name(code), s);
+        free(s);
         opts += len;
     }
 }
@@ -298,24 +305,25 @@ void print_options(uint8_t *opts, int size)
 // Assumes the options are already validated.
 uint8_t *get_option(uint8_t option, uint8_t *opts, int size, char **value, bool multi)
 {
-    if (option < 1 || option >= NUMOPTS) return NULL;
-    if (value) *value = NULL;
-
-    uint8_t *end = opts + size;
-    while (opts < end)
+    if (option > OPT_PAD && option < OPT_END)
     {
-        uint8_t code = *opts++;             // get the option code
-        if (code == 0) continue;            // ignore 0
-        if (code == 255) break;             // done if 255
-        uint8_t len = *opts++;              // get packet length
-        if (code != option)
+        uint8_t *end = opts + size;
+        while (opts < end)
         {
-            opts += len;
-            continue;
+            uint8_t code = *opts++;             // get the option code
+            if (code == OPT_PAD) continue;      // ignore padding
+            if (code == OPT_END) break;         // done
+            uint8_t len = *opts++;              // get packet length
+            if (code != option)
+            {
+                opts += len;
+                continue;
+            }
+            if (value) *value = stringify(known(code) ? options[code].type : opt_u8s, opts, len, false);
+            return opts;
         }
-        if (value) *value = stringify(options[code].type, opts, len, false);
-        return opts;
     }
     // option not found
+    if (value) *value = NULL;
     return NULL;
 }
