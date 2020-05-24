@@ -19,8 +19,10 @@ uint8_t *get_option(uint8_t option, uint8_t *opts, int size, char **value, bool 
 #define OPT_SUBNET 1
 #define OPT_ROUTER 3
 #define OPT_DNS 6
+#define OPT_HOSTNAME 12
 #define OPT_DOMAIN 15
 #define OPT_BROADCAST 28
+#define OPT_REQUEST_IP 50
 #define OPT_LEASE 51
 #define OPT_DHCP_TYPE 53
 #define OPT_SERVER_ID 54
