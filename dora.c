@@ -1,4 +1,4 @@
-#define _GNU_SOURCE // for asprintf()
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -25,7 +25,7 @@
 // print message to stderr
 #define warn(...) fprintf(stderr, __VA_ARGS__)
 
-// print warning and exit
+// print message to stderr and exit
 #define die(...) do { warn(__VA_ARGS__); exit(1); } while(0)
 
 // die if given expression is false
@@ -46,17 +46,19 @@ actually assign the obtained address, track the lease, etc.\n\
 \n\
 Options are:\n\
 \n\
-    -c address      - request specified client address\n\
-    -d              - just send discover and print all offers, implies -x and -u1\n\
-    -h hostname     - request specified hostname\n\
-    -l              - send a DHCPRELEASE, requires -c\n\
-    -o code         - request specified DHCP option, can be used multple times, implies -x\n\
+    -c ipaddress    - use specified client address, default is the first assigned to the interface\n\
+    -d              - just send discover and print all offers\n\
+    -h hostname     - request specific hostname\n\
+    -i              - send a DHCPINFORM\n\
+    -l              - send a DHCPRENEW, usually requires -s\n\
+    -o number       - add specified DHCP option request, can used multple times, implies -x\n\
     -O              - request all 254 possible DHCP options, implies -x\n\
-    -r              - just try to renew the address specified by -a\n\
-    -t seconds      - receive timeout, default is 4\n\
-    -u attempts     - number of attempts to make before giving up, default is 4\n\
-    -v              - dump lots of transaction info to stderr\n\
-    -x              - print received options, one per line\n\
+    -r              - send a DHCPRELEASE, usually requires -s\n\
+    -s ipadress     - unicast to specific server\n\
+    -t number       - receive timeout, default is 4\n\
+    -u number       - attempts to make before giving up, default is 4\n\
+    -v              - dump various debug and warning messages to stderr\n\
+    -x              - extended result report, one DHCP option per line\n\
 ")
 
 #define BOOTPC 68
@@ -85,24 +87,27 @@ uint32_t mS(void)
     return ((uint32_t)t.tv_sec*1000) + (t.tv_nsec/1000000);
 }
 
-// Return random 32-bit number
+// Return true random 32-bit number
 uint32_t rand32(void)
 {
     uint32_t r;
-    expect(syscall(SYS_getrandom, &r, sizeof(int), (int)GRND_NONBLOCK) == sizeof(int));
+    expect(syscall(SYS_getrandom, &r, sizeof(uint32_t), (int)GRND_NONBLOCK) == sizeof(int));
     return r;
 }
 
-// Given network order uint32_t, return dotted quad address string, caller must free it
+// Expand pointer to network-ordered uint32_t into 4-byte sequence, for use with printf
+#define quad(np) ((uint8_t *)np)[0],((uint8_t *)np)[1],((uint8_t *)np)[2],((uint8_t *)np)[3]
+
+// Given a network order uint32_t return dotted-quad address string, caller must free it
 char *ipntos(uint32_t addr)
 {
-    uint8_t *bytes = (uint8_t *)&addr; // big-endian
     char *s;
-    expect(asprintf(&s, "%u.%u.%u.%u", bytes[0], bytes[1], bytes[2], bytes[3]) > 0);
+    expect(s=malloc(16));
+    sprintf(s, "%u.%u.%u.%u", quad(&addr));
     return s;
 }
 
-// Given dotted quad address string return network order uint32_t or 0 if string is invalid.
+// Given dotted-quad address string return network order uint32_t or 0 if string is invalid.
 uint32_t ipston(char *s)
 {
     int a,b,c,d;
@@ -117,6 +122,7 @@ struct packet
     int optsize;                // Size of dhcp options appended to packet
     int type;                   // The DHCP message type
     uint32_t from;              // For received packets, the sender's IP (in network order)
+    uint32_t to;                // unicast destination, or broadcast if 0
     struct                      // This is the actual dhcp packet, see RFC2131
     {
         uint8_t op;             // 1 == request to server, 2 == reply from server
@@ -150,44 +156,34 @@ struct packet
 #define DHCP_RELEASE  7
 #define DHCP_INFORM   8
 
-// interface info
+// interface info is global
 struct
 {
     char *name;
     uint8_t mac[6];
     uint32_t address;
-} ifinfo;
+} interface;
 
-// Send packet to specified address if non-zero, then wait for a valid
+// Send packet if dosend is true, then wait for a valid
 // response. Timeout is in milliseconds. If a response is received, point
 // *recv at it and return remaining timeout >= 0. Caller must free() the
 // response.  If timeout, return -1 and *recv is undefined.
-int transact(int sock, uint32_t to, struct packet *send, struct packet **recv, int timeout)
+int transact(int sock, bool dosend, struct packet *send, struct packet **recv, int timeout)
 {
-    if (to)
+    if (dosend)
     {
-        // insert dhcp params for transmit
-        send->dhcp.op = 1;
-        send->dhcp.htype = 1;
-        send->dhcp.hlen = 6;
-        send->dhcp.flags = htons(0x8000); // all replies should be broadcast
-        memcpy(&send->dhcp.chaddr, &ifinfo.mac, 6);
-        send->dhcp.xid = rand32();
-        send->dhcp.cookie = htonl(COOKIE);
-
+        uint32_t to = send->to ?: 0xFFFFFFFF;
         if (verbose)
         {
-            char *s = ipntos(to);
-            warn("Sending %ld byte packet to %s:\n", DHCP_SIZE+send->optsize, s);
+            warn("Sending %ld byte packet to %u.%u.%u.%u:\n", DHCP_SIZE + send->optsize, quad(&to));
             dump((uint8_t *)&send->dhcp, DHCP_SIZE+send->optsize);
-            free(s);
         }
 
         // Send to BOOTPS port
         struct sockaddr_in tosock;
         tosock.sin_family = AF_INET;
         tosock.sin_port = htons(BOOTPS);
-        tosock.sin_addr.s_addr = htonl(to);
+        tosock.sin_addr.s_addr = to;
         expect(sendto(sock, &send->dhcp, DHCP_SIZE+send->optsize, 0, (struct sockaddr *)&tosock, sizeof(tosock)) == DHCP_SIZE+send->optsize);
     }
 
@@ -209,9 +205,7 @@ int transact(int sock, uint32_t to, struct packet *send, struct packet **recv, i
         p->from = fromsock.sin_addr.s_addr;
         if (verbose)
         {
-            char *s = ipntos(p->from);
-            warn("Received %d byte packet from %s:\n", size, s);
-            free(s);
+            warn("Received %d byte packet from %u.%u.%u.%u:\n", size, quad(&p->from));
             dump((uint8_t *)&p->dhcp, size);
         }
 
@@ -229,23 +223,28 @@ int transact(int sock, uint32_t to, struct packet *send, struct packet **recv, i
         {
             case DHCP_OFFER:
                 if (send->type != DHCP_DISCOVER) goto unexpected;
-                if (!p->dhcp.yiaddr) { debug("Packet does not provide YIADDR\n"); continue; }
                 break;
 
             case DHCP_ACK:
                 if (send->type != DHCP_REQUEST) goto unexpected;
-                if (!p->dhcp.yiaddr) { debug("Packet does not provide YIADDR\n"); continue; }
                 break;
 
             case DHCP_NAK:
-                if (send->type != DHCP_REQUEST) goto unexpected;
-                break;
+                if (verbose)
+                {
+                    char *reason;
+                    if (!get_option(OPT_MESSAGE, p->dhcp.options, p->optsize, &reason, false)) reason=strdup("reason unknown");
+                    warn("NAK from %u.%u.%u.%u: %s\n", quad(&p->from), reason);
+                    free(reason);
+                }
+                continue;
 
             default:
             unexpected:
                 debug("Packet has unexpected message type %d\n", p->type);
                 continue;
         }
+        if (!p->dhcp.yiaddr) { debug("Packet does not provide YIADDR\n"); continue; }
         // return it!
         *recv = p;
         return(timeout > 0 ? timeout : 0);
@@ -301,7 +300,7 @@ void print_packet(struct packet *p, bool extended)
     if (!get_option(OPT_DNS, p->dhcp.options, p->optsize, &dns, false))
     {
         warn("Warning: server did not provide DNS server address\n");
-        dns = router;
+        dns = strdup(router);
         if (extended) printf("%u ! %s: %s\n", OPT_DNS, option_name(OPT_DNS), dns);
     }
 
@@ -309,7 +308,7 @@ void print_packet(struct packet *p, bool extended)
     if (!get_option(OPT_DOMAIN, p->dhcp.options, p->optsize, &domain, false))
     {
         warn("Warning: server did not provide domain name\n");
-        domain = "localdomain";
+        domain=strdup("localdomain");
         if (extended) printf("%u ! %s: %s\n", OPT_DOMAIN, option_name(OPT_DOMAIN), domain);
     }
 
@@ -325,13 +324,21 @@ void print_packet(struct packet *p, bool extended)
     if (!get_option(OPT_LEASE, p->dhcp.options, p->optsize, &lease, false))
     {
         warn("Warning: server did not provide lease time\n");
-        lease = "3600";
+        lease=strdup("3600");
         if (extended) printf("%u ! %s: %s\n", OPT_LEASE, option_name(OPT_LEASE), lease);
     }
 
     if (extended) print_options(p->dhcp.options, p->optsize);
     else printf("%s %s %s %s %s %s %s %s\n", address, subnet, broadcast, router, dns, domain, server, lease);
 
+    free(address);
+    free(subnet);
+    free(broadcast);
+    free(router);
+    free(dns);
+    free(domain);
+    free(server);
+    free(lease);
 }
 
 // Append n DHCP options bytes to packet, fail if total options 312 bytes (i.e. 768 byte packet for worst-case MTU)
@@ -344,6 +351,57 @@ void append(struct packet *p, int n, uint8_t *options)
 
 // Create anonymous array of uint8_t's for use wth append
 #define bytes(...) (uint8_t[]){__VA_ARGS__}
+
+// Return a base dhcp packet of specified type, with various options installed.
+// Caller must free() it.
+struct packet *create_packet(uint8_t type, uint32_t from, uint32_t to, char *hostname, bitarray *params)
+{
+    struct packet *p = calloc(sizeof(struct packet)+MAXOPTS,1);
+    expect(p);
+    p->type = type;
+    p->dhcp.ciaddr = from;
+    p->dhcp.siaddr = to;
+    p->dhcp.op = 1;
+    p->dhcp.htype = 1;
+    p->dhcp.hlen = 6;
+    if (!to) p->dhcp.flags = htons(0x8000); // use broadcast
+    memcpy(p->dhcp.chaddr, &interface.mac, 6);
+    p->dhcp.xid = rand32();
+    p->dhcp.cookie = htonl(COOKIE);
+
+    // dhcp message type option
+    append(p, 3, bytes(OPT_DHCP_TYPE, 1, type));
+
+    // client id option, i.e. a 1 and the mac address
+    append(p, 3, bytes(OPT_CLIENT_ID, 7, 1));
+    append(p, 6, interface.mac);
+
+    // requested IP option
+    if (from)
+    {
+        append(p, 2, bytes(OPT_REQUEST_IP, 4));
+        append(p, 4, (uint8_t *)&from); // note ciaddr is network-order aka big-endian
+    }
+
+    // hostname option
+    if (hostname)
+    {
+        append(p, 2, bytes(OPT_HOSTNAME, strlen(hostname)));
+        append(p, strlen(hostname), (uint8_t *)hostname);
+    }
+
+    // request params
+    if (params)
+    {
+        append(p, 2, bytes(OPT_PARAM_LIST, params->set));
+        for (int n = bitarray_next(params, 1); n > 0; n=bitarray_next(params, n+1)) append(p, 1, bytes(n));
+    }
+
+    // end of options
+    append(p, 1, bytes(OPT_END));
+
+    return p;
+}
 
 int main(int argc, char *argv[])
 {
@@ -386,29 +444,31 @@ int main(int argc, char *argv[])
 
     if (argc != 2) usage();
 
-    ifinfo.name = argv[1];
+    interface.name = argv[1];
 
     int sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
     expect(sock >= 0);
 
     // get mac address
     struct ifreq r;
-    strcpy(r.ifr_name, ifinfo.name);
+    strcpy(r.ifr_name, interface.name);
     expect(!ioctl(sock, SIOCGIFHWADDR, &r));
-    memcpy(&ifinfo.mac, r.ifr_hwaddr.sa_data, 6);
-    if (!ioctl(sock, SIOCGIFADDR, &r)) ifinfo.address = (struct sockaddr_in *)(&r)->sin_addr.s_addr;
+    memcpy(&interface.mac, r.ifr_hwaddr.sa_data, 6);
+    if (!ioctl(sock, SIOCGIFADDR, &r))
+    {
+        interface.address = ((struct sockaddr_in *)&r.ifr_addr)->sin_addr.s_addr;
+        if (verbose) warn("%s has address %u.%u.%u.%u\n", interface.name, quad(&interface.address));
+    }
 
     // allow sock to broadcast, bind to interface
     expect(!setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (int []){1}, sizeof(int)));
     expect(!setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (int []){1}, sizeof(int)));
-    expect(!setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE, interface, strlen(interface)));
+    expect(!setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE, interface.name, strlen(interface.name)));
 
-    debug("Using interface %s with mac %02x:%02x:%02x:%02x:%02x:%02x\n", interface, ifinfo.mac[0], ifinfo.mac[1], ifinfo.mac[2], ifinfo.mac[3], ifinfo.mac[4], ifinfo.mac[5]);
-    if (ifinfo.address && verbose)
+    if (verbose)
     {
-        char *s=ipntos(ifinfo.address);
-        warn("Interface has address %s\n", s);
-        free(s);
+        warn("Using interface %s with mac %02x:%02x:%02x:%02x:%02x:%02x\n", interface.name, interface.mac[0], interface.mac[1], interface.mac[2], interface.mac[3], interface.mac[4], interface.mac[5]);
+        if (interface.address) warn("Interface has address %u.%u.%u.%u\n", quad(&interface.address));
     }
 
     // bind sock to the BOOTPC port
@@ -419,38 +479,7 @@ int main(int argc, char *argv[])
     expect(!bind(sock, (struct sockaddr *)&local, sizeof(local)));
 
     // create discover packet
-    struct packet *discover = calloc(sizeof(struct packet)+MAXOPTS,1);
-    expect(discover);
-    discover->type = DHCP_DISCOVER;
-    discover->dhcp.ciaddr = ciaddr;
-
-    // dhcp message type option
-    append(discover, 3, bytes(OPT_DHCP_TYPE, 1, DHCP_DISCOVER));
-
-    // client id option, i.e. a 1 and the mac address
-    append(discover, 3, bytes(OPT_CLIENT_ID, 7, 1));
-    append(discover, 6, ifinfo.mac);
-
-    // requested IP option
-    if (ciaddr)
-    {
-        append(discover, 2, bytes(OPT_REQUEST_IP, 4));
-        append(discover, 4, (uint8_t *)&ciaddr); // note ciaddr is network-order aka big-endian
-    }
-
-    // hostname option
-    if (hostname)
-    {
-        append(discover, 2, bytes(OPT_HOSTNAME, strlen(hostname)));
-        append(discover, strlen(hostname), (uint8_t *)hostname);
-    }
-
-    // requested parameter list
-    append(discover, 2, bytes(OPT_PARAM_LIST, params->set));
-    for (int n = bitarray_next(params, 1); n > 0; n=bitarray_next(params, n+1)) append(discover, 1, bytes(n));
-
-    // end of options
-    append(discover, 1, bytes(OPT_END));
+    struct packet *discover = create_packet(DHCP_DISCOVER, ciaddr, 0, hostname, params);
 
     if (just_discover)
     {
@@ -458,12 +487,10 @@ int main(int argc, char *argv[])
         int remaining = timeout * 1000;
         debug("Discovering all servers, timeout in %d mS\n", remaining);
         struct packet *offer;
-        while ((remaining = transact(sock, offers ? 0: 0xFFFFFFFF, discover, &offer, remaining))>=0)
+        while ((remaining = transact(sock, offers==0, discover, &offer, remaining))>=0)
         {
             offers++;
-            char *s = ipntos(offer->from);
-            printf("Offered by %s:\n", s);
-            free(s);
+            printf("Offered by %u.%u.%u.%u:\n", quad(&offer->from));
             print_packet(offer, true);
             printf("--------------------------------\n");
             free(offer);
@@ -480,34 +507,10 @@ int main(int argc, char *argv[])
         if (attempt++ >= attempts) die("No DHCP offer received, giving up\n");
         int remaining = ((timeout + attempt) * 1000) - (rand32() % 2001); // random backoff, sort of per the RFC
         debug("Discover attempt %d, timeout in %d mS\n", attempt, remaining);
-        if (transact(sock, 0xFFFFFFFF, discover, &offer, remaining) >= 0) break;
+        if (transact(sock, true, discover, &offer, remaining) >= 0) break;
     }
 
-    struct packet *request = calloc(sizeof(struct packet)+MAXOPTS,1);
-    expect(request);
-    request->type = DHCP_REQUEST;
-    request->dhcp.ciaddr = offer->dhcp.yiaddr;
-
-    // append dhcp message type option
-    append(request, 3, bytes(OPT_DHCP_TYPE, 1, DHCP_REQUEST));
-    // append client id option, i.e. a 1 and the mac address
-    append(request, 3, bytes(OPT_CLIENT_ID, 7, 1));
-    append(request, 6, ifinfo.mac);
-    // append offered IP option
-    append(request, 2, bytes(OPT_REQUEST_IP, 4));
-    append(request, 4, (uint8_t *)&offer->dhcp.yiaddr);
-    // append hostname option
-    if (hostname)
-    {
-        append(request, 2, bytes(OPT_HOSTNAME, strlen(hostname)));
-        append(request, strlen(hostname), (uint8_t *)hostname);
-    }
-    // append requested parameter list
-    append(request, 2, bytes(OPT_PARAM_LIST, params->set));
-    for (int n = bitarray_next(params, 1); n > 0; n=bitarray_next(params, n+1)) append(request, 1, bytes(n));
-
-    // append end of options
-    append(request, 1, bytes(OPT_END));
+    struct packet *request = create_packet(DHCP_REQUEST, offer->dhcp.yiaddr, 0, hostname, params);
 
     attempt = 0;
     struct packet *response;
@@ -516,10 +519,8 @@ int main(int argc, char *argv[])
         if (attempt++ >= attempts) die("No response to DHCP request, giving up\n");
         int remaining = ((timeout + attempt) * 1000) - (rand32() % 2001); // random backoff, sort of per the RFC
         debug("Request attempt %d, timeout in %d mS\n", attempt, remaining);
-        if (transact(sock, 0xFFFFFFFF, request, &response, remaining) >= 0) break;
+        if (transact(sock, true, request, &response, remaining) >= 0) break;
     }
-
-    if (response->type==DHCP_NAK) die("Server NAK'd its own offer\n");
 
     print_packet(response, extended);
 }

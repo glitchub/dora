@@ -27,5 +27,6 @@ uint8_t *get_option(uint8_t option, uint8_t *opts, int size, char **value, bool 
 #define OPT_DHCP_TYPE 53
 #define OPT_SERVER_ID 54
 #define OPT_PARAM_LIST 55
+#define OPT_MESSAGE 56
 #define OPT_CLIENT_ID 61
 #define OPT_END 255
