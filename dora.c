@@ -61,6 +61,60 @@ Options are:\n\
     -x              - extended result report, one DHCP option per line\n\
 ")
 
+//  From RFCC2132
+//  --------                               -------
+// |        | +-------------------------->|       |<-------------------+
+// | INIT-  | |     +-------------------->| INIT  |                    |
+// | REBOOT |DHCPNAK/         +---------->|       |<---+               |
+// |        |Restart|         |            -------     |               |
+//  --------  |  DHCPNAK/     |               |                        |
+//     |      Discard offer   |      -/Send DHCPDISCOVER               |
+// -/Send DHCPREQUEST         |               |                        |
+//     |      |     |      DHCPACK            v        |               |
+//  -----------     |   (not accept.)/   -----------   |               |
+// |           |    |  Send DHCPDECLINE |           |                  |
+// | REBOOTING |    |         |         | SELECTING |<----+            |
+// |           |    |        /          |           |     |DHCPOFFER/  |
+//  -----------     |       /            -----------   |  |Collect     |
+//     |            |      /                  |   |       |  replies   |
+// DHCPACK/         |     /  +----------------+   +-------+            |
+// Record lease, set|    |   v   Select offer/                         |
+// timers T1, T2   ------------  send DHCPREQUEST      |               |
+//     |   +----->|            |             DHCPNAK, Lease expired/   |
+//     |   |      | REQUESTING |                  Halt network         |
+//     DHCPOFFER/ |            |                       |               |
+//     Discard     ------------                        |               |
+//     |   |        |        |                   -----------           |
+//     |   +--------+     DHCPACK/              |           |          |
+//     |              Record lease, set    -----| REBINDING |          |
+//     |                timers T1, T2     /     |           |          |
+//     |                     |        DHCPACK/   -----------           |
+//     |                     v     Record lease, set   ^               |
+//     +----------------> -------      /timers T1,T2   |               |
+//                +----->|       |<---+                |               |
+//                |      | BOUND |<---+                |               |
+//   DHCPOFFER, DHCPACK, |       |    |            T2 expires/   DHCPNAK/
+//    DHCPNAK/Discard     -------     |             Broadcast  Halt network
+//                |       | |         |            DHCPREQUEST         |
+//                +-------+ |        DHCPACK/          |               |
+//                     T1 expires/   Record lease, set |               |
+//                  Send DHCPREQUEST timers T1, T2     |               |
+//                  to leasing server |                |               |
+//                          |   ----------             |               |
+//                          |  |          |------------+               |
+//                          +->| RENEWING |                            |
+//                             |          |----------------------------+
+//                              ----------
+
+//  ---------------------------------------------------------------------
+//  |              |INIT-REBOOT  |SELECTING    |RENEWING     |REBINDING |
+//  ---------------------------------------------------------------------
+//  |broad/unicast |broadcast    |broadcast    |unicast      |broadcast |
+//  |server-ip     |MUST NOT     |MUST         |MUST NOT     |MUST NOT  |
+//  |requested-ip  |MUST         |MUST         |MUST NOT     |MUST NOT  |
+//  |ciaddr        |zero         |zero         |IP address   |IP address|
+//  ---------------------------------------------------------------------
+
 #define BOOTPC 68
 #define BOOTPS 67
 #define COOKIE 0x63825363
@@ -121,8 +175,7 @@ struct packet
 {
     int optsize;                // Size of dhcp options appended to packet
     int type;                   // The DHCP message type
-    uint32_t from;              // For received packets, the sender's IP (in network order)
-    uint32_t to;                // unicast destination, or broadcast if 0
+    uint32_t server;            // Outgoing server address (0=broadcast) or incoming server ID.
     struct                      // This is the actual dhcp packet, see RFC2131
     {
         uint8_t op;             // 1 == request to server, 2 == reply from server
@@ -131,8 +184,8 @@ struct packet
         uint8_t hops;           // legacy: used in cross-gateway booting
         uint32_t xid;           // transaction ID, a random number
         uint16_t secs;          // legacy: seconds elased since client started trying to boot
-        uint16_t flags;         // 0x8000 == replies should be broadcast
-        uint32_t ciaddr;        // client IP address, filled in by client if requesting an address
+        uint16_t flags;         // 0x8000 == server must broadcast replies
+        uint32_t ciaddr;        // client IP address, filled in by client
         uint32_t yiaddr;        // "your" IP address, filled in by server
         uint32_t siaddr;        // server IP address, filled in by server
         uint32_t giaddr;        // legacy: filled in by cross-gateway booting
@@ -147,14 +200,14 @@ struct packet
 #define DHCP_SIZE (sizeof((struct packet *)NULL)->dhcp)
 
 // DHCP message types
-#define DHCP_DISCOVER 1
-#define DHCP_OFFER    2
-#define DHCP_REQUEST  3
-#define DHCP_DECLINE  4
-#define DHCP_ACK      5
-#define DHCP_NAK      6
-#define DHCP_RELEASE  7
-#define DHCP_INFORM   8
+#define DHCPDISCOVER 1
+#define DHCPOFFER    2
+#define DHCPREQUEST  3
+#define DHCPDECLINE  4
+#define DHCPACK      5
+#define DHCPNAK      6
+#define DHCPRELEASE  7
+#define DHCPINFORM   8
 
 // interface info is global
 struct
@@ -164,15 +217,15 @@ struct
     uint32_t address;
 } interface;
 
-// Send packet if dosend is true, then wait for a valid
-// response. Timeout is in milliseconds. If a response is received, point
+// Send packet if dosend is true. Then wait for a valid response is recv is given.
+// Timeout is in milliseconds. If a response is received, point
 // *recv at it and return remaining timeout >= 0. Caller must free() the
 // response.  If timeout, return -1 and *recv is undefined.
 int transact(int sock, bool dosend, struct packet *send, struct packet **recv, int timeout)
 {
     if (dosend)
     {
-        uint32_t to = send->to ?: 0xFFFFFFFF;
+        uint32_t to = send->server ?: 0xFFFFFFFF;
         if (verbose)
         {
             warn("Sending %ld byte packet to %u.%u.%u.%u:\n", DHCP_SIZE + send->optsize, quad(&to));
@@ -187,73 +240,78 @@ int transact(int sock, bool dosend, struct packet *send, struct packet **recv, i
         expect(sendto(sock, &send->dhcp, DHCP_SIZE+send->optsize, 0, (struct sockaddr *)&tosock, sizeof(tosock)) == DHCP_SIZE+send->optsize);
     }
 
-    struct packet *p;
-    expect(p = calloc(sizeof(struct packet)+1024,1));
-    while (timeout > 0)
+    if (recv)
     {
-        int start = mS();
-        struct pollfd pfd = { .fd=sock, .events=POLLIN, .revents=0 };
-        int res = poll(&pfd, 1, timeout);
-        if (!res) break; // timeout
-        expect(res == 1 && pfd.revents & POLLIN);
-        timeout -= mS()-start; // subtract elapsed time
-        struct sockaddr_in fromsock;
-        socklen_t fsize = sizeof(struct sockaddr_in);
-        int size = recvfrom(sock, &p->dhcp, DHCP_SIZE+1024, 0, (struct sockaddr *)&fromsock, &fsize);
-
-        expect(size > 0 && fsize == sizeof(struct sockaddr_in));
-        p->from = fromsock.sin_addr.s_addr;
-        if (verbose)
+        struct packet *p;
+        expect(p = calloc(sizeof(struct packet)+1024,1));
+        while (timeout > 0)
         {
-            warn("Received %d byte packet from %u.%u.%u.%u:\n", size, quad(&p->from));
-            dump((uint8_t *)&p->dhcp, size);
+            int start = mS();
+            struct pollfd pfd = { .fd=sock, .events=POLLIN, .revents=0 };
+            int res = poll(&pfd, 1, timeout);
+            if (!res) break; // timeout
+            expect(res == 1 && pfd.revents & POLLIN);
+            timeout -= mS()-start; // subtract elapsed time
+            struct sockaddr_in fromsock;
+            socklen_t fsize = sizeof(struct sockaddr_in);
+            int size = recvfrom(sock, &p->dhcp, DHCP_SIZE+1024, 0, (struct sockaddr *)&fromsock, &fsize);
+
+            expect(size > 0 && fsize == sizeof(struct sockaddr_in));
+            uint32_t from = fromsock.sin_addr.s_addr;
+            if (verbose)
+            {
+                warn("Received %d byte packet from %u.%u.%u.%u:\n", size, quad(&from));
+                dump((uint8_t *)&p->dhcp, size);
+            }
+
+            // ignore bogus packets, replies to someone else
+            p->optsize = size - DHCP_SIZE;
+            if (size < DHCP_SIZE+8) { debug("Packet is too short\n"); continue; }
+            if (p->dhcp.op != 2) { debug("Packet has wrong op\n"); continue; }
+            if (p->dhcp.htype != 1) { debug("Packet has wrong htype\n"); continue; }
+            if (p->dhcp.hlen != 6) { debug("Packet has wrong hlen\n"); continue; }
+            if (p->dhcp.xid != send->dhcp.xid) { debug("Packet has XID %X, expected %X\n", p->dhcp.xid, send->dhcp.xid); continue; }
+            if (memcmp(send->dhcp.chaddr, p->dhcp.chaddr, 16)) { debug("Packet has wrong chaddr\n"); continue; }
+            if (ntohl(p->dhcp.cookie) != COOKIE) { debug("Packet has invalid cookie\n"); continue; }
+            if ((p->type = check_options(p->dhcp.options, p->optsize, verbose)) < 0) { debug("Packet options are invalid\n"); continue; }
+            uint32_t *i;
+            if (!(i=(uint32_t *)get_option(OPT_SERVER_ID, p->dhcp.options, p->optsize, NULL, false))) { debug("Packet does not provide server ID\n"); continue; }
+            p->server = *i; // remember it
+            switch (p->type)
+            {
+                case DHCPOFFER:
+                    if (send->type != DHCPDISCOVER) { debug("Packet is unexpected OFFER\n"); continue; }
+                    break;
+
+                case DHCPACK:
+                    if (send->type != DHCPREQUEST) { debug("Packet is unexpected ACK\n"); continue; }
+                    break;
+
+                case DHCPNAK:
+                    if (verbose)
+                    {
+                        char *reason;
+                        if (!get_option(OPT_MESSAGE, p->dhcp.options, p->optsize, &reason, false)) reason=strdup("reason unknown");
+                        warn("Packet is a NAK: %s\n", reason);
+                        free(reason);
+                    }
+                    continue;
+
+                default:
+                    debug("Packet has invalid message type %d\n", p->type);
+                    continue;
+            }
+            if (!p->dhcp.yiaddr) { debug("Packet does not provide YIADDR\n"); continue; }
+            // return it!
+            *recv = p;
+            return(timeout > 0 ? timeout : 0);
         }
-
-        // ignore bogus packets, replies to someone else
-        p->optsize = size - DHCP_SIZE;
-        if (size < DHCP_SIZE+8) { debug("Packet is too short\n"); continue; }
-        if (p->dhcp.op != 2) { debug("Packet has wrong op\n"); continue; }
-        if (p->dhcp.htype != 1) { debug("Packet has wrong htype\n"); continue; }
-        if (p->dhcp.hlen != 6) { debug("Packet has wrong hlen\n"); continue; }
-        if (p->dhcp.xid != send->dhcp.xid) { debug("Packet has XID %X, expected %X\n", p->dhcp.xid, send->dhcp.xid); continue; }
-        if (memcmp(send->dhcp.chaddr, p->dhcp.chaddr, 16)) { debug("Packet has wrong chaddr\n"); continue; }
-        if (ntohl(p->dhcp.cookie) != COOKIE) { debug("Packet has invalid cookie\n"); continue; }
-        if ((p->type = check_options(p->dhcp.options, p->optsize, verbose)) < 0) { debug("Packet options are invalid\n"); continue; }
-        switch (p->type)
-        {
-            case DHCP_OFFER:
-                if (send->type != DHCP_DISCOVER) goto unexpected;
-                break;
-
-            case DHCP_ACK:
-                if (send->type != DHCP_REQUEST) goto unexpected;
-                break;
-
-            case DHCP_NAK:
-                if (verbose)
-                {
-                    char *reason;
-                    if (!get_option(OPT_MESSAGE, p->dhcp.options, p->optsize, &reason, false)) reason=strdup("reason unknown");
-                    warn("NAK from %u.%u.%u.%u: %s\n", quad(&p->from), reason);
-                    free(reason);
-                }
-                continue;
-
-            default:
-            unexpected:
-                debug("Packet has unexpected message type %d\n", p->type);
-                continue;
-        }
-        if (!p->dhcp.yiaddr) { debug("Packet does not provide YIADDR\n"); continue; }
-        // return it!
-        *recv = p;
-        return(timeout > 0 ? timeout : 0);
+        free(p);
     }
-    free(p);
     return -1;
 }
 
-void print_packet(struct packet *p, bool extended)
+void display(struct packet *p, bool extended)
 {
     // address
     char *address = ipntos(p->dhcp.yiaddr);
@@ -292,7 +350,7 @@ void print_packet(struct packet *p, bool extended)
     if (!get_option(OPT_ROUTER, p->dhcp.options, p->optsize, &router, false))
     {
         warn("Warning: server did not provide router address\n");
-        router = ipntos(p->dhcp.siaddr?:p->from); // use the siaddr if given, else the IP source address
+        router = ipntos(p->server); // assume the server is the router (home network)
         if (extended) printf("%u ! %s: %s\n", OPT_ROUTER, option_name(OPT_ROUTER), router);
     }
 
@@ -312,13 +370,7 @@ void print_packet(struct packet *p, bool extended)
         if (extended) printf("%u ! %s: %s\n", OPT_DOMAIN, option_name(OPT_DOMAIN), domain);
     }
 
-    char *server;
-    if (!get_option(OPT_SERVER_ID, p->dhcp.options, p->optsize, &server, false))
-    {
-        warn("Warning: server did not provide server ID\n");
-        server = ipntos(p->dhcp.siaddr?:p->from);; // use siaddr if given, else the IP source address
-        if (extended) printf("%u ! %s: %s\n", OPT_SERVER_ID, option_name(OPT_SERVER_ID), server);
-    }
+    char *server = ipntos(p->server);
 
     char *lease;
     if (!get_option(OPT_LEASE, p->dhcp.options, p->optsize, &lease, false))
@@ -354,33 +406,55 @@ void append(struct packet *p, int n, uint8_t *options)
 
 // Return a base dhcp packet of specified type, with various options installed.
 // Caller must free() it.
-struct packet *create_packet(uint8_t type, uint32_t from, uint32_t to, char *hostname, bitarray *params)
+// client is installed as then requested IP.
+// server is installed as the server ID.
+// If bound then unicast to set and set ciaddr.
+struct packet *create(uint8_t type, uint32_t client, uint32_t server, bool bound, char *hostname, bitarray *params)
 {
+    uint32_t xid = 0;
+    while (!xid) xid=rand32(); // create xid once, all packets will use it
+
     struct packet *p = calloc(sizeof(struct packet)+MAXOPTS,1);
     expect(p);
     p->type = type;
-    p->dhcp.ciaddr = from;
-    p->dhcp.siaddr = to;
     p->dhcp.op = 1;
     p->dhcp.htype = 1;
     p->dhcp.hlen = 6;
-    if (!to) p->dhcp.flags = htons(0x8000); // use broadcast
+    if (bound)
+    {
+        p->server = server;
+        p->dhcp.flags = 0;
+        p->dhcp.ciaddr = client;
+    } else
+    {
+        p->server = 0;
+        p->dhcp.flags = htons(0x8000); // use broadcast
+        p->dhcp.ciaddr = 0;
+    }
+
     memcpy(p->dhcp.chaddr, &interface.mac, 6);
-    p->dhcp.xid = rand32();
+    p->dhcp.xid = xid;
     p->dhcp.cookie = htonl(COOKIE);
 
-    // dhcp message type option
+    // dhcp message type
     append(p, 3, bytes(OPT_DHCP_TYPE, 1, type));
 
-    // client id option, i.e. a 1 and the mac address
+    // client id, i.e. a 1 and the mac address
     append(p, 3, bytes(OPT_CLIENT_ID, 7, 1));
     append(p, 6, interface.mac);
 
     // requested IP option
-    if (from)
+    if (client && type != DHCPRELEASE)
     {
         append(p, 2, bytes(OPT_REQUEST_IP, 4));
-        append(p, 4, (uint8_t *)&from); // note ciaddr is network-order aka big-endian
+        append(p, 4, (uint8_t *)&client);
+    }
+
+    // server ID option
+    if (server)
+    {
+        append(p, 2, bytes(OPT_SERVER_ID, 4));
+        append(p, 4, (uint8_t *)&server);
     }
 
     // hostname option
@@ -408,9 +482,11 @@ int main(int argc, char *argv[])
     int timeout = 5;
     int attempts = 4;
     bool extended = false;
-    uint32_t ciaddr = 0;                        // desired client address
+    uint32_t address = 0;                       // desired client address
+    uint32_t server = 0;                        // unicast server address
     char *hostname = NULL;                      // desired hostname
     bool just_discover = false;                 // if true, just do discovery
+    bool just_release = false;                  // if true, just do release
 
     bitarray *params = bitarray_create(255);    // bit array of requested DHCP params
     bitarray_set(params, OPT_SUBNET);           // We always want these
@@ -422,13 +498,15 @@ int main(int argc, char *argv[])
 
     #define invalid() do { warn("Option -%c argument is invalid\n", o); usage(); } while(0)
     char o;
-    while ((o=(getopt(argc, argv, ":c:dh:o:Ot:u:vx")))) switch(o)
+    while ((o=(getopt(argc, argv, ":a:dh:o:Ors:t:u:vx")))) switch(o)
     {
-        case 'c': ciaddr = ipston(optarg); if (!ciaddr) invalid(); break;
+        case 'a': address = ipston(optarg); if (!address) invalid(); break;
         case 'd': just_discover = true; break;
         case 'h': hostname = optarg; if (strlen(hostname) > 32) invalid(); break;
         case 'o': if (bitarray_set(params, strtoul(optarg, NULL, 0))) invalid(); extended = true; break;
         case 'O': for (int n=1; n<255; n++) bitarray_set(params, n); extended = true; break;
+        case 'r': just_release = true; break;
+        case 's': server = ipston(optarg); if (!server) invalid(); break;
         case 't': if ((timeout = strtoul(optarg, NULL, 0)) <= 0) invalid(); break;
         case 'u': if ((attempts = strtoul(optarg, NULL, 0)) <= 0) invalid(); break;
         case 'v': verbose = true; break;
@@ -478,8 +556,19 @@ int main(int argc, char *argv[])
     local.sin_addr.s_addr = htonl(INADDR_BROADCAST);
     expect(!bind(sock, (struct sockaddr *)&local, sizeof(local)));
 
+    if (just_release)
+    {
+        if (!address) address = interface.address;
+        if (!address) die("No address to release\n");
+        if (!server) die("Must specify -s with -l\n");
+        struct packet *release = create(DHCPRELEASE, address, server, true, NULL, NULL);
+        warn("Releasing %u.%u.%u.%u to server %u.%u.%u.%u\n", quad(&address), quad(&server));
+	transact(sock, true, release, NULL, 0);
+	exit(0);
+    }
+
     // create discover packet
-    struct packet *discover = create_packet(DHCP_DISCOVER, ciaddr, 0, hostname, params);
+    struct packet *discover = create(DHCPDISCOVER, address, 0, false, hostname, params);
 
     if (just_discover)
     {
@@ -490,8 +579,8 @@ int main(int argc, char *argv[])
         while ((remaining = transact(sock, offers==0, discover, &offer, remaining))>=0)
         {
             offers++;
-            printf("Offered by %u.%u.%u.%u:\n", quad(&offer->from));
-            print_packet(offer, true);
+            printf("Offered by %u.%u.%u.%u:\n", quad(&offer->server));
+            display(offer, true);
             printf("--------------------------------\n");
             free(offer);
         }
@@ -510,7 +599,7 @@ int main(int argc, char *argv[])
         if (transact(sock, true, discover, &offer, remaining) >= 0) break;
     }
 
-    struct packet *request = create_packet(DHCP_REQUEST, offer->dhcp.yiaddr, 0, hostname, params);
+    struct packet *request = create(DHCPREQUEST, offer->dhcp.yiaddr, offer->server, false, hostname, params);
 
     attempt = 0;
     struct packet *response;
@@ -522,5 +611,5 @@ int main(int argc, char *argv[])
         if (transact(sock, true, request, &response, remaining) >= 0) break;
     }
 
-    print_packet(response, extended);
+    display(response, extended);
 }
