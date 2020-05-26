@@ -1,16 +1,39 @@
-dora is a stand alone dhcp client and test tool. It communicates with the dhcp
-server but does not resident, assign addresses or manage leases.
+Dora is a dhcp client and test tool. It communicates with dhcp servers but
+does not lter interface configuration or manage leases.
 
-Without options, other than an interface name, dora will broadcast a DHCP
-discover and wait for an offer. dora broadcasts a DHCP request for the first
-valid offer, and waits for an acknowledge. Finally dora prints a single line to
-stdout, in the form:
+In normal use dora is invoked for a non-configured interface, obtains an
+address via DHCP and prints a single line to stdout in format:
 
-    address netmask gateway dhcp domain server lease
+    address netmask broadcast router dns domain server lease
 
 For example:
 
+    $ dora eth0
     192.168.1.117 255.255.255.254 192.168.0.1 8.8.8.8 localdomain 192.168.1.254 86400
+
+The invoking code is responsible for configuring the interface and updating
+/etc/resolv.conf. It must also store the server address and arrange for the
+lease to be renewed. When the lease is 50% expired (in this case after 43200 seconds), dora can be re-invoked:
+
+    $ dora -l -s 192.168.0.1 eth0
+    192.168.1.117 255.255.255.254 192.168.0.1 8.8.8.8 localdomain 192.168.1.254 86400
+
+
+
+
+
+The -c option can be used to request a specific IP address (the server is not obligated to honor the request):
+
+    $ dora -c 192.168.1.200
+    192.168.1.200 255.255.255.254 192.168.0.1 8.8.8.8 localdomain 192.168.1.254 86400
+
+
+It is up to the calling code to use this information to configure the interface
+and update resolv.conf.
+
+
+
+
 
 The invoking program may uses this information to configure the interface and
 /etc/resolv.conf. The invoking program can also keep track of the lease time
