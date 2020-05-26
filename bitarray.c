@@ -2,7 +2,9 @@
 #include <stdlib.h>
 #include "bitarray.h"
 
-// return 1 if numbered bit is set, 0 if clear, -1 if bit number is invalid
+// Bit array operations
+
+// Return 1 if numbered bit is set, 0 if reset, -1 if bit number is invalid
 int bitarray_test(bitarray *b, unsigned bit)
 {
     if (bit >= b->bits) return -1;
@@ -10,36 +12,36 @@ int bitarray_test(bitarray *b, unsigned bit)
 }
 
 // Set numbered bit and return 0, or -1 if bit number is invalid
-// Track the number of bits set
+// Track the number of bits set.
 int bitarray_set(bitarray *b, unsigned bit)
 {
     if (bit >= b->bits) return -1;
     if (!bitarray_test(b, bit))
     {
-        b->set++;
+        b->numset++;
         b->array[bit/8] |= (1 << (bit & 7));
     }
     return 0;
 }
 
 // Reset numbered bit and return 0, or -1 if bit number is invalid
-// Track the number of bits set
-int bitarray_clear(bitarray *b, unsigned bit)
+// Track the number of bits set.
+int bitarray_reset(bitarray *b, unsigned bit)
 {
     if (bit >= b->bits) return -1;
     if (bitarray_test(b, bit))
     {
-        b->set--;
+        b->numset--;
         b->array[bit/8] &= ~(1 << (bit & 7));
     }
     return 0;
 }
 
 // Clear all bits in the array
-void bitarray_init(bitarray *b)
+void bitarray_wipe(bitarray *b)
 {
     memset(b->array, 0, (b->bits+7)/8);
-    b->set = 0;
+    b->numset = 0;
 }
 
 // Create new bit array and return pointer, or NULL if OOM.
@@ -50,16 +52,22 @@ bitarray *bitarray_create(unsigned bits)
     if (b)
     {
         b->bits = bits;
-        bitarray_init(b);
+        bitarray_wipe(b);
     }
     return b;
+}
+
+// Return number of set bits in the bitarray
+int bitarray_numset(bitarray *b)
+{
+    return b->numset;
 }
 
 // Given a bit number, the next highest set bit (or that bit, if it's set).
 // Or return -1 if none.
 int bitarray_next(bitarray *b, unsigned bit)
 {
-    if (bit >= b->bits) return -1;
+    if (bit >= b->bits || !b->numset) return -1;
     if (b->array[bit/8] < 1 << (bit & 7))
     {
         bit = (bit & ~7) + 8;

@@ -50,7 +50,7 @@ Options are:\n\
     -d              - just broadcast a discover and print all offers\n\
     -f              - force operation even if interface already has an address\n\
     -h hostname     - request specific hostname\n\
-    -i              - elicit local network information for current interface address (DHCPINFORM)\n\
+    -i              - elicit local network information for current interface address\n\
     -l              - renew the lease for the current interface address, requires -s\n\
     -L              - rebind the lease for the current interface address\n\
     -o number       - request DHCP option 1 to 254, can used multple times, implies -x\n\
@@ -60,7 +60,7 @@ Options are:\n\
     -t number       - receive timeout seconds, default is 4\n\
     -u number       - transmit attempts, default is 4\n\
     -v              - dump various status messages and other information to stderr\n\
-    -x              - output extended result report, one DHCP option per line\n\
+    -x              - output extended result report to stdout, one DHCP option per line\n\
 ")
 
 #define BOOTPC 68
@@ -104,8 +104,8 @@ uint32_t rand32(void)
 char *ipntos(uint32_t addr)
 {
     char *s;
-    expect(s=malloc(16));
-    sprintf(s, "%u.%u.%u.%u", quad(&addr));
+    expect(s = malloc(16));
+    snprintf(s, 16, "%u.%u.%u.%u", quad(&addr));
     return s;
 }
 
@@ -223,6 +223,7 @@ struct packet *create(int type, uint32_t client, uint32_t server, char *hostname
         case RENEW:
             expect(server);
             expect(client);
+            expect(interface.address);
             p->server = server;         // unicast
             p->dhcp.ciaddr = client;
             server = 0;                 // no server ID
@@ -240,6 +241,7 @@ struct packet *create(int type, uint32_t client, uint32_t server, char *hostname
         case RELEASE:
             expect(server);             // must have server ID
             expect(client);
+            expect(interface.address);
             p->server = server;         // unicast
             p->dhcp.ciaddr = client;
             client = 0;                 // no requested IP
@@ -247,7 +249,7 @@ struct packet *create(int type, uint32_t client, uint32_t server, char *hostname
 
         case INFORM:
             expect(client);
-            p->server = server;         // optionally unicast
+            p->server = interface.address ? server : 0; // optionally unicast if interface can support
             p->dhcp.ciaddr = client;
             server = 0;                 // no server ID
             client = 0;                 // no requested IP
@@ -280,9 +282,9 @@ struct packet *create(int type, uint32_t client, uint32_t server, char *hostname
     }
 
     // request params
-    if (params)
+    if (params && bitarray_numset(params))
     {
-        append(p, 2, bytes(OPT_PARAM_LIST, params->set));
+        append(p, 2, bytes(OPT_PARAM_LIST, bitarray_numset(params)));
         for (int n = bitarray_next(params, 1); n > 0; n=bitarray_next(params, n+1)) append(p, 1, bytes(n));
     }
 
@@ -292,10 +294,11 @@ struct packet *create(int type, uint32_t client, uint32_t server, char *hostname
     return p;
 }
 
-// Send packet if dosend is true. Then wait for a valid response is recv is given.
-// Timeout is in milliseconds. If a response is received, point
-// *recv at it and return remaining timeout >= 0. Caller must free() the
-// response.  If timeout, return -1 and *recv is undefined.
+// Given an outgoing dhcp packet, send it if dosend is true. Then wait for a
+// valid response if receive is not NULL. Receive timeout is in milliseconds.
+// If a valid response is received, point *recv at it and return remaining
+// timeout >= 0. Caller must free() recv. If timeout (or server sends a NAK),
+// return -1 and *recv is undefined.
 int transact(int sock, bool dosend, struct packet *send, struct packet **recv, int timeout)
 {
     if (dosend)
@@ -317,8 +320,8 @@ int transact(int sock, bool dosend, struct packet *send, struct packet **recv, i
 
     if (recv)
     {
-        struct packet *p;
-        expect(p = calloc(sizeof(struct packet)+1024,1));
+        struct packet *p = calloc(sizeof(struct packet)+1024,1);
+        expect(p);
         debug("Waiting %d mS for response\n", timeout);
         while (timeout > 0)
         {
@@ -358,6 +361,7 @@ int transact(int sock, bool dosend, struct packet *send, struct packet **recv, i
                 case OFFER:
                     if (send->type != DISCOVER) { debug("Packet is unexpected DHCPOFFER\n"); continue; }
                     if (!p->dhcp.yiaddr) { debug("DHCPOFFER does not provide yiaddr\n"); continue; }
+                    debug("Packet is DHCPOFFER of %u.%u.%u.%u\n", quad(&p->dhcp.yiaddr));
                     break;
 
                 case ACK:
@@ -367,6 +371,7 @@ int transact(int sock, bool dosend, struct packet *send, struct packet **recv, i
                         case RENEW:
                         case REBIND:
                             if (!p->dhcp.yiaddr) { debug("DHCPACK to DHCPREQUEST does not provide yiaddr\n"); continue; }
+                            debug("Packet is DHCPACK for %u.%u.%u.%u\n", quad(&p->dhcp.yiaddr));
                             break;
                         case INFORM:
                             if (p->dhcp.yiaddr) { debug("DHCPACK to DHCPINFORM provides yiaddr\n"); continue; }
@@ -385,7 +390,12 @@ int transact(int sock, bool dosend, struct packet *send, struct packet **recv, i
                         warn("Packet is DHCPNAK: %s\n", reason);
                         free(reason);
                     }
-                    if (dosend && send->server) return -1; // if it was unicast, might as well quit now
+                    // if request was unicast might as well quit now
+                    if (dosend && send->server)
+                    {
+                        free(p);
+                        return -1;
+                    }
                     continue;
 
                 default:
@@ -417,7 +427,7 @@ void display(struct packet *p, bool extended)
         mask = *(uint32_t *)sn;
     else
     {
-        warn("Warning: server did not provide subnet mask\n");
+        debug("Server did not provide subnet mask\n");
         switch(ntohl(yiaddr))
         {
             case 0x10000000 ... 0x10FFFFFF: mask = htonl(0xFF000000); break; // 10.x.x.x -> 255.0.0.0
@@ -426,39 +436,39 @@ void display(struct packet *p, bool extended)
             default: mask = 0; break; // meh
         }
         subnet = ipntos(mask);
-        if (extended) printf("%u ! %s: %s\n", OPT_SUBNET, option_name(OPT_SUBNET), subnet);
+        if (extended) printf("%u !%s: %s\n", OPT_SUBNET, option_name(OPT_SUBNET), subnet);
     }
 
     char *broadcast;
     if (!get_option(OPT_BROADCAST, p->dhcp.options, p->optsize, &broadcast, false))
     {
-        warn("Warning: server did not provide broadcast address\n");
+        debug("Server did not provide broadcast address\n");
         broadcast = ipntos(~mask | (yiaddr & mask));
-        if (extended) printf("%u ! %s: %s\n", OPT_BROADCAST, option_name(OPT_BROADCAST), broadcast);
+        if (extended) printf("%u !%s: %s\n", OPT_BROADCAST, option_name(OPT_BROADCAST), broadcast);
     }
 
     char *router;
     if (!get_option(OPT_ROUTER, p->dhcp.options, p->optsize, &router, false))
     {
-        warn("Warning: server did not provide router address\n");
+        debug("Server did not provide router address\n");
         router = ipntos(p->server); // assume the server is the router (home network)
-        if (extended) printf("%u ! %s: %s\n", OPT_ROUTER, option_name(OPT_ROUTER), router);
+        if (extended) printf("%u !%s: %s\n", OPT_ROUTER, option_name(OPT_ROUTER), router);
     }
 
     char *dns;
     if (!get_option(OPT_DNS, p->dhcp.options, p->optsize, &dns, false))
     {
-        warn("Warning: server did not provide DNS server address\n");
+        debug("Server did not provide DNS server address\n");
         dns = strdup(router);
-        if (extended) printf("%u ! %s: %s\n", OPT_DNS, option_name(OPT_DNS), dns);
+        if (extended) printf("%u !%s: %s\n", OPT_DNS, option_name(OPT_DNS), dns);
     }
 
     char *domain;
     if (!get_option(OPT_DOMAIN, p->dhcp.options, p->optsize, &domain, false))
     {
-        warn("Warning: server did not provide domain name\n");
+        debug("Server did not provide domain name\n");
         domain=strdup("localdomain");
-        if (extended) printf("%u ! %s: %s\n", OPT_DOMAIN, option_name(OPT_DOMAIN), domain);
+        if (extended) printf("%u !%s: %s\n", OPT_DOMAIN, option_name(OPT_DOMAIN), domain);
     }
 
     char *server = ipntos(p->server);
@@ -466,9 +476,9 @@ void display(struct packet *p, bool extended)
     char *lease;
     if (!get_option(OPT_LEASE, p->dhcp.options, p->optsize, &lease, false))
     {
-        warn("Warning: server did not provide lease time\n");
-        lease=strdup("3600");
-        if (extended) printf("%u ! %s: %s\n", OPT_LEASE, option_name(OPT_LEASE), lease);
+        debug("Server did not provide lease time\n");
+        lease=strdup("0");
+        if (extended) printf("%u !%s: %s\n", OPT_LEASE, option_name(OPT_LEASE), lease);
     }
 
     if (extended) print_options(p->dhcp.options, p->optsize);
@@ -509,7 +519,7 @@ int main(int argc, char *argv[])
     bitarray_set(params, OPT_BROADCAST);
     bitarray_set(params, OPT_LEASE);
 
-    #define invalid() do { warn("Option -%c argument is invalid\n", o); usage(); } while(0)
+    #define invalid() die("Option -%c argument is invalid\n", o);
     char o;
     while ((o=(getopt(argc, argv, ":c:dfh:ilLo:Ors:t:u:vx")))) switch(o)
     {
@@ -537,7 +547,11 @@ int main(int argc, char *argv[])
     argc -= optind-1;
     argv += optind-1;
 
-    if (argc != 2) usage();
+    if (argc != 2)
+    {
+        if (optind > 1) warn("Must specify an interface\n");
+        usage();
+    }
 
     interface.name = argv[1];
 
@@ -547,24 +561,27 @@ int main(int argc, char *argv[])
     // get mac address
     struct ifreq r;
     strcpy(r.ifr_name, interface.name);
-    expect(!ioctl(sock, SIOCGIFFLAGS, &r));
-    expect(r.ifr_flags & IFF_RUNNING); // interface must be up
+    if (ioctl(sock, SIOCGIFFLAGS, &r)) die("Unable to access %s: %s\n", interface.name, strerror(errno));
+    if (!(r.ifr_flags & IFF_RUNNING)) die("Interface is not up\n");
     expect(!ioctl(sock, SIOCGIFHWADDR, &r));
     memcpy(&interface.mac, r.ifr_hwaddr.sa_data, 6);
+
     // remember interface address, if any
     if (!ioctl(sock, SIOCGIFADDR, &r)) interface.address = ((struct sockaddr_in *)&r.ifr_addr)->sin_addr.s_addr;
-    // allow broadcast
-    expect(!setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (int []){1}, sizeof(int)));
-    // bind to specified interface (otherwise kernel won't route if no IP)
-    expect(!setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE, interface.name, strlen(interface.name)));
-    // Don't SO_REUSEADDR, we want to fail if a dhcp client is already running
+
+    // allow broadcast, may be privileged
+    if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (int []){1}, sizeof(int))) die("Unable to enable broadcast on %s: %s\n", interface.name, strerror(errno));
+
+    // bind to specified interface (otherwise kernel won't route if no IP), may be privileged
+    if (setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE, interface.name, strlen(interface.name))) die("Unable to bind %s: %s\n", interface.name, strerror(errno));
 
     // bind to the BOOTPC port
     struct sockaddr_in local = { 0 };
     local.sin_family = AF_INET;
     local.sin_port = htons(BOOTPC);
-    local.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-    expect(!bind(sock, (struct sockaddr *)&local, sizeof(local)));
+    local.sin_addr.s_addr = htonl(INADDR_ANY);
+    // fails if address already in use
+    if (bind(sock, (struct sockaddr *)&local, sizeof(local))) die("Unable to bind to port %d: %s\n", BOOTPC, strerror(errno));
 
     switch (action)
     {
@@ -588,36 +605,30 @@ int main(int argc, char *argv[])
 
         case do_release:
         {
-            uint32_t addr = interface.address;
-            if (force && client) addr = client;
-            if (!addr) die("%s doesn't have an address to release\n", interface.name);
-            if (!server) die("Release requires a server address\n");
-            struct packet *release = create(RELEASE, addr, server, NULL, NULL);
+            if (!interface.address) die("Interface is not configured\n");
+            if (!server) die("Must specify a server address\n");
+            struct packet *release = create(RELEASE, client ?: interface.address, server, NULL, NULL);
 	    transact(sock, true, release, NULL, 0); // server will no respond
 	    break;
         }
 
         case do_inform:
         {
-            uint32_t addr = interface.address;
-            if (force && client) addr = client;
-            if (!addr) die("%s doesn't have an address to inform\n", interface.name);
-            struct packet *inform = create(INFORM, addr, server, hostname, params); // maybe unicast to server if specified
+            if (!interface.address) die("Interface is not configured\n");
+            struct packet *inform = create(INFORM, client?:interface.address, server, hostname, params); // maybe unicast to server if specified
             int attempt = 0;
             struct packet *ack;
             while (transact(sock, true, inform, &ack, backoff(attempt+1)) < 0)
                 if (++attempt >= attempts) die("No ack received, giving up\n");
-            display(ack,extended);
+            display(ack, extended);
             break;
         }
 
         case do_renew:
         {
-            uint32_t addr = interface.address;
-            if (force && client) addr = client;
-            if (!addr) die("%s doesn't have an address to renew\n", interface.name);
+            if (!interface.address) die("Interface is not configured\n");
             if (!server) die("Must specify a server address\n");
-            struct packet *renew = create(RENEW, addr, server, hostname, params);
+            struct packet *renew = create(RENEW, client?:interface.address, server, hostname, params);
             struct packet *ack;
             int attempt = 0;
             while (transact(sock, true, renew, &ack, backoff(attempt+1)) < 0)
@@ -628,10 +639,8 @@ int main(int argc, char *argv[])
 
         case do_rebind:
         {
-            uint32_t addr = interface.address;
-            if (force && client) addr = client;
-            if (!addr) die("%s doesn't have an address to rebind\n", interface.name);
-            struct packet *rebind = create(REBIND, addr, 0, hostname, params);
+            if (!client && !interface.address) die("Interface is not configured\n");
+            struct packet *rebind = create(REBIND, client?:interface.address, 0, hostname, params);
             struct packet *ack;
             int attempt = 0;
             while (transact(sock, true, rebind, &ack, backoff(attempt+1)) < 0)
@@ -644,13 +653,11 @@ int main(int argc, char *argv[])
         {
             // normal dhcp dora
             if (interface.address && !force) die("%s already has an address\n", interface.name);
-            if (client) debug("Requesting client address %u.%u.%u.%u\n", quad(&client));
             struct packet *discover = create(DISCOVER, client, server, hostname, params);
             int attempt = 0;
             struct packet *offer;
             while(transact(sock, true, discover, &offer, backoff(attempt+1)) < 0)
                 if (++attempt >= attempts) die("No offer received, giving up\n");
-            debug("Offer for %u.%u.%u.%u received from %u.%u.%u.%u\n", quad(&offer->dhcp.yiaddr), quad(&offer->server));
             struct packet *request = create(REQUEST, offer->dhcp.yiaddr, offer->server, hostname, params);
             attempt = 0;
             struct packet *ack;

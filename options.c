@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <arpa/inet.h>
+#include <ctype.h>
 
 #include "options.h"
 
@@ -40,80 +41,80 @@ static struct
     int type;   // one of the above, if 0 then option is not supported
 } options[] =
 {
-    [ 1] = {"Subnet mask", opt_IP},                         // Sent before the router option (option 3) if both are included
-    [ 2] = {"Time offset", opt_32},                        // Signed seconds from UCT
+    [ 1] = {"Subnet_Mask", opt_IP},                         // Sent before the router option (option 3) if both are included
+    [ 2] = {"Time_Offset", opt_32},                         // Signed seconds from UCT
     [ 3] = {"Router",  opt_IPs},                            // Available routers, should be listed in order of preference
-    [ 4] = {"Time server", opt_IPs},                        // Available time servers to synchronise with, should be listed in order of preference
-    [ 5] = {"Name server", opt_IPs},                        // Available IEN 116 name servers, should be listed in order of preference
-    [ 6] = {"Domain name server", opt_IPs},                 // Available DNS servers, should be listed in order of preference
-    [ 7] = {"Log server", opt_IPs},                         // Available log servers, should be listed in order of preference
-    [ 8] = {"Cookie server", opt_IPs},
-    [ 9] = {"LPR Server", opt_IPs},
-    [10] = {"Impress server", opt_IPs},
-    [11] = {"Resource location server", opt_IPs},
-    [12] = {"Host name", opt_str},
-    [13] = {"Boot file size", opt_u16},                     // Length of the boot image in 4KiB blocks
-    [14] = {"Merit dump file", opt_str},                    // Path where crash dumps should be stored
-    [15] = {"Domain name", opt_str},
-    [16] = {"Swap server", opt_IP},
-    [17] = {"Root path",  opt_str},
-    [18] = {"Extensions path", opt_str},
-    [19] = {"IP forwarding enable/disable", opt_u8},
-    [20] = {"Non-local source routing enable/disable", opt_u8},
-    [21] = {"Policy filter", opt_IPMs},
-    [22] = {"Maximum datagram reassembly size", opt_u16},
-    [23] = {"Default IP time-to-live", opt_u8},
-    [24] = {"Path MTU aging timeout",  opt_u32},
-    [25] = {"Path MTU plateau table", opt_u16s},
-    [26] = {"Interface MTU", opt_u16},
-    [27] = {"All subnets are local", opt_u8},
-    [28] = {"Broadcast address", opt_IP},
-    [29] = {"Perform mask discovery", opt_u8},
-    [30] = {"Mask supplier", opt_u8},
-    [31] = {"Perform router discovery", opt_u8},
-    [32] = {"Router solicitation address", opt_IP},
-    [33] = {"Static route", opt_IPMs},                      // List of destination/router pairs
-    [34] = {"Trailer encapsulation option", opt_u8},
-    [35] = {"ARP cache timeout", opt_u32},
-    [36] = {"Ethernet encapsulation", opt_u8},
-    [37] = {"TCP default TTL", opt_u8},
-    [38] = {"TCP keepalive interval",  opt_u32},
-    [39] = {"TCP keepalive garbage", opt_u8},
-    [40] = {"Network information service domain", opt_str},
-    [41] = {"Network information server", opt_IPs},
-    [42] = {"Network Time Protocol (NTP) server", opt_IPs},
-    [43] = {"Vendor-specific information", opt_u8s},        // Theoretically does not appear in DHCP responses
-    [44] = {"NetBIOS over TCP/IP name server", opt_IPs},
-    [45] = {"NetBIOS over TCP/IP datagram Distribution Server",opt_IPs},
-    [46] = {"NetBIOS over TCP/IP node type", opt_u8},
-    [47] = {"NetBIOS over TCP/IP scope", opt_str},
-    [48] = {"X Window System font server",  opt_IPs},
-    [49] = {"X Window System display manager", opt_IPs},
-    [50] = {"Requested IP address", opt_IP},
-    [51] = {"IP address lease seconds", opt_u32},
-    [52] = {"Option overload", opt_u8},                     // Theoretically does not appear in DHCP responses
-    [53] = {"DHCP response type", opt_u8},                  // DHCP response type
-    [54] = {"Server identifier", opt_IP},                   // Server's IP address
-    [55] = {"Parameter request list", opt_u8s},             // Theoretically does not appear in DHCP responses
+    [ 4] = {"Time_Server", opt_IPs},                        // Available time servers to synchronise with, should be listed in order of preference
+    [ 5] = {"Name_Server", opt_IPs},                        // Available IEN 116 name servers, should be listed in order of preference
+    [ 6] = {"Domain_Name_Server", opt_IPs},                 // Available DNS servers, should be listed in order of preference
+    [ 7] = {"Log_Server", opt_IPs},                         // Available log servers, should be listed in order of preference
+    [ 8] = {"Cookie_Server", opt_IPs},
+    [ 9] = {"LPR_Server", opt_IPs},
+    [10] = {"Impress_Server", opt_IPs},
+    [11] = {"Resource_Location_Server", opt_IPs},
+    [12] = {"Host_Name", opt_str},
+    [13] = {"Boot_File_Size", opt_u16},                     // Length of the boot image in 4KiB blocks
+    [14] = {"Merit_Dump_File", opt_str},                    // Path where crash dumps should be stored
+    [15] = {"Domain_Name", opt_str},
+    [16] = {"Swap_Server", opt_IP},
+    [17] = {"Root_Path",  opt_str},
+    [18] = {"Extensions_Path", opt_str},
+    [19] = {"IP_Forwarding_Enable/Disable", opt_u8},
+    [20] = {"Non-Local_Source_Routing_Enable/Disable", opt_u8},
+    [21] = {"Policy_Filter", opt_IPMs},
+    [22] = {"Maximum_Datagram_Reassembly_Size", opt_u16},
+    [23] = {"Default_IP_Time-To-Live", opt_u8},
+    [24] = {"Path_MTU_Aging_Timeout",  opt_u32},
+    [25] = {"Path_MTU_Plateau_Table", opt_u16s},
+    [26] = {"Interface_MTU", opt_u16},
+    [27] = {"All_Subnets_Are_Local", opt_u8},
+    [28] = {"Broadcast_Address", opt_IP},
+    [29] = {"Perform_Mask_Discovery", opt_u8},
+    [30] = {"Mask_Supplier", opt_u8},
+    [31] = {"Perform_Router_Discovery", opt_u8},
+    [32] = {"Router_Solicitation_Address", opt_IP},
+    [33] = {"Static_Route", opt_IPMs},                      // List of destination/router pairs
+    [34] = {"Trailer_Encapsulation_Option", opt_u8},
+    [35] = {"ARP_Cache_Timeout", opt_u32},
+    [36] = {"Ethernet_Encapsulation", opt_u8},
+    [37] = {"TCP_Default_TTL", opt_u8},
+    [38] = {"TCP_Keepalive_Interval",  opt_u32},
+    [39] = {"TCP_Keepalive_Garbage", opt_u8},
+    [40] = {"Network_Information_Service_Domain", opt_str},
+    [41] = {"Network_Information_Server", opt_IPs},
+    [42] = {"Network_Time_Protocol_(NTP)_Server", opt_IPs},
+    [43] = {"Vendor-Specific_Information", opt_u8s},        // Theoretically does not appear in DHCP responses
+    [44] = {"NetBIOS_Over_TCP/IP_Name_Server", opt_IPs},
+    [45] = {"NetBIOS_Over_TCP/IP_Datagram_Distribution_Server",opt_IPs},
+    [46] = {"NetBIOS_Over_TCP/IP_Node_Type", opt_u8},
+    [47] = {"NetBIOS_Over_TCP/IP_Scope", opt_str},
+    [48] = {"X_Window_System_Font_Server",  opt_IPs},
+    [49] = {"X_Window_System_Display_Manager", opt_IPs},
+    [50] = {"Requested_IP_Address", opt_IP},
+    [51] = {"IP_Address_Lease_Seconds", opt_u32},
+    [52] = {"Option_Overload", opt_u8},                     // Theoretically does not appear in DHCP responses
+    [53] = {"DHCP_Response_Type", opt_u8},                  // DHCP response type
+    [54] = {"Server_Identifier", opt_IP},                   // Server's IP address
+    [55] = {"Parameter_Request_List", opt_u8s},             // Theoretically does not appear in DHCP responses
     [56] = {"Message", opt_str},                            // Error message from server, in DHCP NAK
-    [57] = {"Maximum DHCP message size", opt_u16},
-    [58] = {"Renewal seconds", opt_u32},
-    [59] = {"Rebinding seconds", opt_u32},
-    [60] = {"Vendor class identifier", opt_u8s},            // Theoretically does not appear in DHCP responses
-    [61] = {"Client-identifier", opt_str},                  // Theoretically does not appear in DHCP responses
-    [64] = {"Network Information Service+ domain", opt_str},
-    [65] = {"Network Information Service+ server", opt_IPs},
-    [66] = {"TFTP server name", opt_str},
-    [67] = {"Bootfile name", opt_str},
-    [68] = {"Mobile IP home agent", opt_IPs},
-    [69] = {"Simple Mail Transfer Protocol (SMTP) server", opt_IPs},
-    [70] = {"Post Office Protocol (POP3) server", opt_IPs},
-    [71] = {"Network News Transfer Protocol (NNTP) server", opt_IPs},
-    [72] = {"Default World Wide Web (WWW) server", opt_IPs},
-    [73] = {"Default Finger protocol server", opt_IPs},
-    [74] = {"Default Internet Relay Chat (IRC) server", opt_IPs},
-    [75] = {"StreetTalk server", opt_IPs},
-    [76] = {"StreetTalk Directory Assistance (STDA) server", opt_IPs},
+    [57] = {"Maximum_DHCP_Message_Size", opt_u16},
+    [58] = {"Renewal_Seconds", opt_u32},
+    [59] = {"Rebinding_Seconds", opt_u32},
+    [60] = {"Vendor_Class_Identifier", opt_u8s},            // Theoretically does not appear in DHCP responses
+    [61] = {"Client-Identifier", opt_str},                  // Theoretically does not appear in DHCP responses
+    [64] = {"Network_Information_Service+_Domain", opt_str},
+    [65] = {"Network_Information_Service+_Server", opt_IPs},
+    [66] = {"TFTP_Server_Name", opt_str},
+    [67] = {"Bootfile_Name", opt_str},
+    [68] = {"Mobile_IP_Home_Agent", opt_IPs},
+    [69] = {"Simple_Mail_Transfer_Protocol_(SMTP)_Server", opt_IPs},
+    [70] = {"Post_Office_Protocol_(POP3)_Server", opt_IPs},
+    [71] = {"Network_News_Transfer_Protocol_(NNTP)_Server", opt_IPs},
+    [72] = {"Default_World_Wide_Web_(WWW)_Server", opt_IPs},
+    [73] = {"Default_Finger_Protocol_Server", opt_IPs},
+    [74] = {"Default_Internet_Relay_Chat_(IRC)_Server", opt_IPs},
+    [75] = {"StreetTalk_Server", opt_IPs},
+    [76] = {"StreetTalk_Directory_Assistance_(STDA)_Server", opt_IPs},
 };
 #define NUMOPTS 77
 
@@ -173,6 +174,7 @@ static char *stringify(uint8_t type, uint8_t *data, uint8_t len, bool multi)
         case opt_str:
             p = calloc(len+1, 1);
             sprintf(p, "%.*s", len, (char *)data);
+            for (char *pp = p; *pp; pp++) if (!isprint(*pp)) *pp='?';
             break;
 
         case opt_IP:
@@ -276,10 +278,10 @@ int check_options(uint8_t *opts, int size, bool verbose)
     return -1;
 }
 
-// Just return option name or "Unknown option"
+// Just return option name or "Unknown"
 char *option_name(uint8_t code)
 {
-    return known(code) ? options[code].name : "Unknown option";
+    return known(code) ? options[code].name : "Unknown";
 }
 
 // Print dhcp options to stdout, assumes they are already validated.
