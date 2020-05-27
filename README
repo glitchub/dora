@@ -150,7 +150,7 @@ Options:
         Where:
 
             "option" is the decimal option number, as defined at
-            https://tools.ietf.org/html/rfc2132#ref-1.
+            https://tools.ietf.org/html/rfc2132.
 
             "description" is arbitrary text from that RFC, guaranteed to not
             contains spaces.
