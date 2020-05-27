@@ -48,7 +48,7 @@ Options are:\n\
 \n\
     -c ipaddress    - request client address\n\
     -d              - just broadcast a discover and print all offers\n\
-    -f              - force operation even if interface already has an address\n\
+    -f              - force lease acquisition even if interface already has an address\n\
     -h hostname     - request specific hostname\n\
     -i              - elicit local network information for current interface address\n\
     -l              - renew the lease for the current interface address, requires -s\n\
@@ -253,7 +253,6 @@ struct packet *create(int type, uint32_t client, uint32_t server, char *hostname
             p->dhcp.ciaddr = client;
             server = 0;                 // no server ID
             client = 0;                 // no requested IP
-            params = NULL;              // no params
             hostname = NULL;            // no hostname
             break;
     }
@@ -599,6 +598,7 @@ int main(int argc, char *argv[])
                 printf("--------------------------------\n");
                 free(offer);
             }
+            if (!offers) die("No offers received\n");
             printf("Received %d offers\n", offers);
             break;
         }
