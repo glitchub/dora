@@ -29,39 +29,55 @@
 #define die(...) do { warn(__VA_ARGS__); exit(1); } while(0)
 
 // die if given expression is false
-#define expect(q) do { if (!(q)) die("Failed expectation on line %d: %s (%s)\n", __LINE__, #q, strerror(errno)); } while(0)
+#ifdef TERSE
+#define expect(q) do { if (!(q)) die("Failed expect line %d\n", __LINE__); } while(0)
+#else
+#define expect(q) do { if (!(q)) die("Failed expect on line %d: %s (%s)\n", __LINE__, #q, strerror(errno)); } while(0)
+#endif
 
+#ifdef TERSE
+#define verbose false
+#define debug(...)
+#else
 // warn if verbose
 bool verbose = false;
 #define debug(...) do { if (verbose) warn(__VA_ARGS__); } while(0)
+#endif
 
+#ifdef TERSE
+#define usage() die("Usage: dora [options] [command [server]] interface\n")
+#else
 #define usage() die("\
 Usage:\n\
 \n\
-    dora [options] interface\n\
+    dora [options] [command [server]] interface\n\
 \n\
-Perform a DHCP Discover-Offer-Request-Acknowledge transaction on specified\n\
-interface and print the result to stdout. The invoking code is expected to\n\
-actually assign the obtained address, track the lease, etc.\n\
+Perform a DHCP transaction on specified interface and print the result to\n\
+stdout.\n\
+\n\
+Commands are:\n\
+    acquire             - perform normal DHCP transaction\n\
+    renew <serverip>    - renew an existing lease with specified server\n\
+    rebind              - rebind an existing lease\n\
+    release <server>    - release an existing lease\n\
+    inform              - attempt to elicit information about a statically assigned IP\n\
+    probe               - print information about all servers on the subnet, for test\n\
 \n\
 Options are:\n\
 \n\
-    -c ipaddress    - request client address\n\
-    -d              - just broadcast a discover and print all offers\n\
-    -f              - force lease acquisition even if interface already has an address\n\
-    -h hostname     - request specific hostname\n\
-    -i              - elicit local network information for current interface address\n\
-    -l              - renew the lease for the current interface address, requires -s\n\
-    -L              - rebind the lease for the current interface address\n\
-    -o number       - request DHCP option 1 to 254, can used multple times, implies -x\n\
-    -O              - request all 254 possible DHCP options, implies -x\n\
-    -r              - release the lease for the current interface address, requires -s\n\
-    -s ipaddress    - unicast to DHCP server address\n\
-    -t number       - receive timeout seconds, default is 4\n\
-    -u number       - transmit attempts, default is 4\n\
-    -v              - dump various status messages and other information to stderr\n\
-    -x              - output extended result report to stdout, one DHCP option per line\n\
+    -c ipaddress        - request client address\n\
+    -f                  - force acquire even if interface already has an address\n\
+    -h hostname         - request specific hostname\n\
+    -o number           - request DHCP option 1 to 254, can used multple times, implies -x\n\
+    -O                  - request all 254 possible DHCP options, implies -x\n\
+    -t number           - transaction timeout seconds, default is 4\n\
+    -u number           - max transaction attempts, default is 4\n\
+    -v                  - dump various status messages and other information to stderr\n\
+    -x                  - output extended result report format, one DHCP option per line\n\
+\n\
+See the README for more information.\n\
 ")
+#endif
 
 #define BOOTPC 68
 #define BOOTPS 67
@@ -415,7 +431,11 @@ void display(struct packet *p, bool extended)
     // address from packet or current
     uint32_t yiaddr = p->dhcp.yiaddr?:interface.address;
     char *address = ipntos(yiaddr);
+#ifdef TERSE
+    if (extended) printf("0 : %s\n", address);
+#else
     if (extended) printf("0 Address: %s\n", address);
+#endif
 
     // subnet mask
     char *subnet;
@@ -496,9 +516,6 @@ void display(struct packet *p, bool extended)
 // return random backoff for current attempt (1-based)
 #define backoff(attempt) (((timeout+attempt)*1000)-(rand32()%2001))
 
-// possible actions
-enum { do_test=1, do_inform, do_renew, do_rebind, do_release };
-
 int main(int argc, char *argv[])
 {
     int timeout = 5;
@@ -507,8 +524,7 @@ int main(int argc, char *argv[])
     uint32_t client = 0;                        // desired client address
     uint32_t server = 0;                        // unicast server address
     char *hostname = NULL;                      // desired hostname
-    bool force = false;                         // if true, force operation
-    int action = 0;                             // one of the actions above, by default do regular dhcp
+    bool force = false;                         // if true, force acquire
 
     bitarray *params = bitarray_create(255);    // bit array of requested DHCP params
     bitarray_set(params, OPT_SUBNET);           // We always want these
@@ -518,41 +534,71 @@ int main(int argc, char *argv[])
     bitarray_set(params, OPT_BROADCAST);
     bitarray_set(params, OPT_LEASE);
 
-    #define invalid() die("Option -%c argument is invalid\n", o);
-    char o;
-    while ((o=(getopt(argc, argv, ":c:dfh:ilLo:Ors:t:u:vx")))) switch(o)
+    if (argc < 2) usage();
+
+    while (true) switch(getopt(argc, argv, ":c:fh:o:Ot:u:vx"))
     {
-        case 'c': client = ipston(optarg); if (!client) invalid(); break;
-        case 'd': action = do_test; break;
+        case 'c': client = ipston(optarg); if (!client) die("Invalid client IP %s\n", optarg); break;
         case 'f': force = true; break;
-        case 'h': hostname = optarg; if (strlen(hostname) > 32) invalid(); break;
-        case 'i': action = do_inform; break;
-        case 'l': action = do_renew; break;
-        case 'L': action = do_rebind; break;
-        case 'o': if (bitarray_set(params, strtoul(optarg, NULL, 0))) invalid(); extended = true; break;
+        case 'h': hostname = optarg; if (strlen(hostname) > 32) die("Hostname cannot exceed 31 chars\n"); break;
+        case 'o': if (bitarray_set(params, strtoul(optarg, NULL, 0))) die("Invalid parameter %s\n", optarg); extended = true; break;
         case 'O': for (int n=1; n<255; n++) bitarray_set(params, n); extended = true; break;
-        case 'r': action = do_release; break;
-        case 's': server = ipston(optarg); if (!server) invalid(); break;
-        case 't': if ((timeout = strtoul(optarg, NULL, 0)) <= 0) invalid(); break;
-        case 'u': if ((attempts = strtoul(optarg, NULL, 0)) <= 0) invalid(); break;
+        case 't': if ((timeout = strtoul(optarg, NULL, 0)) <= 0) die("Invalid timeout %s\n", optarg); break;
+        case 'u': if ((attempts = strtoul(optarg, NULL, 0)) <= 0) die("Invalid attempts %s\n", optarg); break;
+#ifndef TERSE
         case 'v': verbose = true; break;
+#endif
         case 'x': extended = true; break;
 
-        case ':':            // missing
-        case '?': usage();   // or invalid options
+        case ':':            // missing or invalid
+        case '?': die("Invalid option\n");
         case -1: goto optx;  // no more options
     } optx:
 
     argc -= optind-1;
     argv += optind-1;
 
-    if (argc != 2)
+    char *command;
+    switch(argc)
     {
-        if (optind > 1) warn("Must specify an interface\n");
-        usage();
+        case 1: die("Must specify an interface\n");
+
+        case 2:
+            command = "acquire";
+            interface.name = argv[1];
+            break;
+
+        case 3:
+            command = argv[1];
+            interface.name = argv[2];
+            break;
+
+        case 4:
+            command = argv[1];
+            server = ipston(argv[2]); if (!server) die("Invalid server IP '%s'\n", argv[2]);
+            interface.name = argv[3];
+            break;
+
+        default: die("Too many arguments\n");
     }
 
-    interface.name = argv[1];
+#define op_acquire 0
+#define op_probe 1
+#define op_inform 2
+#define op_renew 3
+#define op_rebind 4
+#define op_release 5
+
+    // Identify desired command, maybe partial, leaves op set to one of the above. Die if invalid.
+    struct { int m; char *s; } cmds[] = {{1,"acquire"},{1,"probe"},{1,"inform"},{3,"renew"},{3,"rebind"},{3,"release"},{0, NULL}};
+    int op = 0;
+    int l = strlen(command);
+    while (true)
+    {
+        if (!cmds[op].m) die("Invalid command '%s'\n", command);
+        if (l >= cmds[op].m && !strncmp(command, cmds[op].s, l)) break;
+        op++;
+    }
 
     int sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
     expect(sock >= 0);
@@ -582,9 +628,9 @@ int main(int argc, char *argv[])
     // fails if address already in use
     if (bind(sock, (struct sockaddr *)&local, sizeof(local))) die("Unable to bind to port %d: %s\n", BOOTPC, strerror(errno));
 
-    switch (action)
+    switch (op)
     {
-        case do_test:
+        case op_probe:
         {
             int offers = 0;
             struct packet *discover = create(DISCOVER, 0, 0, NULL, params);
@@ -595,7 +641,7 @@ int main(int argc, char *argv[])
                 offers++;
                 printf("Offered by %u.%u.%u.%u:\n", quad(&offer->server));
                 display(offer, true);
-                printf("--------------------------------\n");
+                printf("------\n");
                 free(offer);
             }
             if (!offers) die("No offers received\n");
@@ -603,7 +649,7 @@ int main(int argc, char *argv[])
             break;
         }
 
-        case do_release:
+        case op_release:
         {
             if (!interface.address) die("Interface is not configured\n");
             if (!server) die("Must specify a server address\n");
@@ -612,7 +658,7 @@ int main(int argc, char *argv[])
 	    break;
         }
 
-        case do_inform:
+        case op_inform:
         {
             if (!interface.address) die("Interface is not configured\n");
             struct packet *inform = create(INFORM, client?:interface.address, server, hostname, params); // maybe unicast to server if specified
@@ -624,7 +670,7 @@ int main(int argc, char *argv[])
             break;
         }
 
-        case do_renew:
+        case op_renew:
         {
             if (!interface.address) die("Interface is not configured\n");
             if (!server) die("Must specify a server address\n");
@@ -637,7 +683,7 @@ int main(int argc, char *argv[])
             break;
         }
 
-        case do_rebind:
+        case op_rebind:
         {
             if (!client && !interface.address) die("Interface is not configured\n");
             struct packet *rebind = create(REBIND, client?:interface.address, 0, hostname, params);
@@ -651,7 +697,7 @@ int main(int argc, char *argv[])
 
         default:
         {
-            // normal dhcp dora
+            // op_acquire, do normal dhcp
             if (interface.address && !force) die("%s already has an address\n", interface.name);
             struct packet *discover = create(DISCOVER, client, server, hostname, params);
             int attempt = 0;

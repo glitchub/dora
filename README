@@ -17,42 +17,112 @@ a single line, in form:
 
 The invoking program can use this information to bring up the interface, set
 the default route, and configure /etc/resolv.conf.  It must also arrange to
-renew the lease at time T1 (lease time * 0.5), or rebind at time T2 (lease time
-* 0.875), or acquire a new lease when the existing one expires.
+renew the lease at time T1 (50% of the lease time), or rebind at time T2 (87.5%
+of the lease time), or acquire a new lease when the existing one expires.
 
-To obtain a lease (on an unconfigured interface):
+To obtain a lease on an unconfigured interface:
 
     $ dora eth0
     192.168.1.117 255.255.254.0 192.168.1.255 192.168.0.1 8.8.8.8 localdomain 192.168.1.254 86400
 
 To renew a lease at time T1:
 
-    $ dora -l -s xx.xx.xx.xx eth0
+    $ dora renew xx.xx.xx.xx eth0
     192.168.1.117 255.255.254.0 192.168.1.255 192.168.0.1 8.8.8.8 localdomain 192.168.1.254 86400
 
     The DHCP server address must be specified.
 
 To rebind a lease at time T2 (if the renew failed):
 
-    $ dora -L eth0
+    $ dora rebind eth0
     192.168.1.117 255.255.254.0 192.168.1.255 192.168.0.1 8.8.8.8 localdomain 192.168.1.254 86400
+
+    Note this is a broadcast. This can be used an the primary renew mechanism
+    if the server address is unknown.
 
 To release a previously obtained lease:
 
-    $ dora -r -s xx.xx.xx.xx eth0
+    $ dora release xx.xx.xx.xx eth0
 
-    The DHCP server must be specified. There is no output.
+    The DHCP server must be specified. The serer won't respond, so This command exits immediately.
 
 To obtain local network information on an interface already configured with
 static IP address:
 
-    $ dora -i eth0
+    $ dora inform eth0
     192.168.1.117 255.255.254.0 192.168.1.255 192.168.0.1 8.8.8.8 localdomain 192.168.1.254 0
 
-    This uses a DHCPINFORM message. The server's response will either not
-    include a lease time (because it is not a lease) so it is reported as 0, or
-    it will report the remaining seconds for an existing lease.
+    The server will return network specific information with lease time 0
+    (because it's not a lease). However if a lease actually does exist some
+    servers may return remaining lease seconds, some may not respond at all.
 
+To probe a subnet for existing DHCP servers:
+
+    $ dora probe eth0
+
+    All offers received before timeout will be printed to stdout in expanded
+    format. This does not acquire a lease.  If no offers are received, report
+    an error.
+
+\n\
+Perform a DHCP transaction and write the result in parseable form to stdout.\n\
+The invoking code is responsible for configuring the interface, tracking lease\n\
+timeouts, etc.\n\
+\n\
+Commands are:\n\
+\n\
+    acquire - Obtain a DHCP lease in the usual fashion. The interface must not\n\
+    be configured. (This is the default if no command is specified.)\n\
+\n\
+    inform - broadcast a request for local network information without\n\
+    creating a lease. The interface must already be configured (presumably\n\
+    with a static IP address).\n\
+\n\
+    renew <server> - Unicast a DHCP renew for the current configured address\n\
+    to the specified server, this is normally done when the lease is 50%\n\
+    expired.\n\
+\n\
+    rebind - Broadcast an DHCP renew for the current configured address, this\n\
+    is normally done when the lease is 87.5% expired (if there was no response\n\
+    to renew).\n\
+\n\
+    release <server> - Unicast a DHCP release to the specified server address\n\
+    and exit. There is no response.\n\
+\n\
+    probe - For testing, broadcast DHCPDISCOVER and dump all received offers to\n\
+    stdout without actually acquiring any of them. If no offers are received,\n\
+    treat it as an error.\n\
+\n\
+Options are:\n\
+\n\
+    -c <ip> - desired client IP or IP override. \n\
+    \n\
+    -f - Force an acquire operation even if the interface is already\n\
+    configured.\n\
+\n\
+    -h <hostname> - Include the hostname in DHCP transaction, the server may\n\
+    or may not propagate it to the local DNS server.\n\
+\n\
+    -o number - request DHCP option 1 to 254, can used multple times, implies -x\n\
+\n\
+    -O - request all 254 possible DHCP options, implies -x\n\
+\n\
+    -t number - receive timeout seconds, default is 4\n\
+    \n\
+    -u number - transmit attempts, default is 4\n\
+\n\
+    -v - dump various status messages and other information to stderr\n\
+\n\
+    -x - output extended result report to stdout, one DHCP option per line\n\
+\n\
+The output is normally a single line on stdout consisting space-seperated tokens:\n\
+\n\
+    address subnet broadcast router dnsserver domainname dhcpserver lease\n\
+\n\
+E.G.:\n\
+    \n\
+     ./dora eth0\n\
+    172.16.0.144 255.31.0.0 172.31.255.255 172.16.0.1 8.8.8.8 localdomain 172.31.255.24 86400\n\
 Options:
 
     -c ipaddress - request client address
@@ -190,3 +260,7 @@ Options:
         This is all the options provided by the server, in this case including
         option 252 which is not defined by the spec. A DHCPINFORM reply usually
         won't include lease seconds, so this entry was synthesized.
+
+Just run 'make' to build the dora executable, it should be about 27K bytes.
+'make terse' removes the -v option and the DHCP option text (leaving only the
+':' in the output), this shrinks the executable to about 19K bytes.
