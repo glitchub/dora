@@ -1,144 +1,72 @@
-Dora is an embeddable DHCP client and test tool. It is able to communicate with
-DHCP servers to obtain, renew, and release leases. However it does not
-configure interfaces or daemonize in order to perform lease renewal, this is
-the responsibility of invoking code.
+Dora is an embeddable DHCP client and test tool.
 
 Dora performs privileged network operations, which usually means it has to be
 run as root.
 
 In all cases, if a dora operation completes successfully it terminates with
-exit status 0. If not, it prints some kind of message to stderr and exits with
-non-zero status).
+exit status 0. If not, it prints a message to stderr and exits with non-zero
+status.
 
-For most operations, dora will print interesting lease information to stdout on
-a single line, in form:
+The command format is:
 
-    address subnet broadcast router nameserver domain dhcpserver lease-seconds
+    dora [options] [command [server]] interface
 
-The invoking program can use this information to bring up the interface, set
-the default route, and configure /etc/resolv.conf.  It must also arrange to
-renew the lease at time T1 (50% of the lease time), or rebind at time T2 (87.5%
-of the lease time), or acquire a new lease when the existing one expires.
+For most commands, dora prints lease information to stdout on a single line, in
+form:
 
-To obtain a lease on an unconfigured interface:
+    address subnet broadcast router dnsserver domainname dhcpserver lease
 
-    $ dora eth0
+For example:
+
+    $ dora acquire eth0
     192.168.1.117 255.255.254.0 192.168.1.255 192.168.0.1 8.8.8.8 localdomain 192.168.1.254 86400
 
-To renew a lease at time T1:
+The invoking program is responsible for using this information to bring up the
+interface, set the default route, configure /etc/resolv.conf, etc. It may also
+arrange to renew the lease at time T1 (50% of the lease time), rebind at time
+T2 (87.5% of the lease time), or acquire a new lease when the existing lease
+expires.
 
-    $ dora renew xx.xx.xx.xx eth0
-    192.168.1.117 255.255.254.0 192.168.1.255 192.168.0.1 8.8.8.8 localdomain 192.168.1.254 86400
+Commands are:
 
-    The DHCP server address must be specified.
+    acquire - obtain a DHCP lease in the usual fashion, via broadcast. The
+    interface must not be configured. This is the default if no command is
+    specified at all.
 
-To rebind a lease at time T2 (if the renew failed):
+    renew xx.xx.xx.xx - unicast a DHCP renew for the current configured address
+    to the specified server, this is normally done when the lease is 50%
+    expired (aka time T1).  If no response is received, the client tries to
+    rebind at time T2.
 
-    $ dora rebind eth0
-    192.168.1.117 255.255.254.0 192.168.1.255 192.168.0.1 8.8.8.8 localdomain 192.168.1.254 86400
+    rebind - broadcast a DHCP renew for the current configured address, this
+    is normally done when the lease is 87.5% expired (aka time T1). If no
+    response is received, the client must attempt to acquire a new lease.
 
-    Note this is a broadcast. This can be used an the primary renew mechanism
-    if the server address is unknown.
+    release xx.xx.xx.xx - Unicast a DHCP release to the specified server
+    address. The server won't respond, so this command exits immediately.
 
-To release a previously obtained lease:
+    inform - broadcast a request for local network information without creating
+    a lease. The interface is presumably configured with a static IP address.
+    Typically the resulting lease time will be 0, since no lease is issued.
+    However if the server does actually have a lease for the requesting IP it
+    may return the remaining lease seconds, or it may not respod at all.
 
-    $ dora release xx.xx.xx.xx eth0
+    probe - broadcast a DHCP discover and print all offers received before the
+    timeout period. No lease is actually obtained, this is a way to find out if
+    there are DHCP servers on the subnet. If no offers are received, report an
+    error.
 
-    The DHCP server must be specified. The serer won't respond, so This command exits immediately.
-
-To obtain local network information on an interface already configured with
-static IP address:
-
-    $ dora inform eth0
-    192.168.1.117 255.255.254.0 192.168.1.255 192.168.0.1 8.8.8.8 localdomain 192.168.1.254 0
-
-    The server will return network specific information with lease time 0
-    (because it's not a lease). However if a lease actually does exist some
-    servers may return remaining lease seconds, some may not respond at all.
-
-To probe a subnet for existing DHCP servers:
-
-    $ dora probe eth0
-
-    All offers received before timeout will be printed to stdout in expanded
-    format. This does not acquire a lease.  If no offers are received, report
-    an error.
-
-\n\
-Perform a DHCP transaction and write the result in parseable form to stdout.\n\
-The invoking code is responsible for configuring the interface, tracking lease\n\
-timeouts, etc.\n\
-\n\
-Commands are:\n\
-\n\
-    acquire - Obtain a DHCP lease in the usual fashion. The interface must not\n\
-    be configured. (This is the default if no command is specified.)\n\
-\n\
-    inform - broadcast a request for local network information without\n\
-    creating a lease. The interface must already be configured (presumably\n\
-    with a static IP address).\n\
-\n\
-    renew <server> - Unicast a DHCP renew for the current configured address\n\
-    to the specified server, this is normally done when the lease is 50%\n\
-    expired.\n\
-\n\
-    rebind - Broadcast an DHCP renew for the current configured address, this\n\
-    is normally done when the lease is 87.5% expired (if there was no response\n\
-    to renew).\n\
-\n\
-    release <server> - Unicast a DHCP release to the specified server address\n\
-    and exit. There is no response.\n\
-\n\
-    probe - For testing, broadcast DHCPDISCOVER and dump all received offers to\n\
-    stdout without actually acquiring any of them. If no offers are received,\n\
-    treat it as an error.\n\
-\n\
-Options are:\n\
-\n\
-    -c <ip> - desired client IP or IP override. \n\
-    \n\
-    -f - Force an acquire operation even if the interface is already\n\
-    configured.\n\
-\n\
-    -h <hostname> - Include the hostname in DHCP transaction, the server may\n\
-    or may not propagate it to the local DNS server.\n\
-\n\
-    -o number - request DHCP option 1 to 254, can used multple times, implies -x\n\
-\n\
-    -O - request all 254 possible DHCP options, implies -x\n\
-\n\
-    -t number - receive timeout seconds, default is 4\n\
-    \n\
-    -u number - transmit attempts, default is 4\n\
-\n\
-    -v - dump various status messages and other information to stderr\n\
-\n\
-    -x - output extended result report to stdout, one DHCP option per line\n\
-\n\
-The output is normally a single line on stdout consisting space-seperated tokens:\n\
-\n\
-    address subnet broadcast router dnsserver domainname dhcpserver lease\n\
-\n\
-E.G.:\n\
-    \n\
-     ./dora eth0\n\
-    172.16.0.144 255.31.0.0 172.31.255.255 172.16.0.1 8.8.8.8 localdomain 172.31.255.24 86400\n\
-Options:
+Options are:
 
     -c ipaddress - request client address
 
         For normal DHCP, this defines a desired IP address, which the server is
         under no obligation to provide. For other operations if this is
-        specified it will be used instead of the existing interface address.
+        specified it will be used instead of the primary interface address, but
+        note if not a secondary address the server's response won't be
+        received.
 
-    -d - just broadcast a discover and print all offers
-
-        This is for testing, it can be used to find DHCP servers active on the
-        interface. If servers are found, exits with status 0, else with status
-        1. The extended output format is used for each response (see below).
-        Add -o or -O to see options provided by each server.
-
-    -f - force lease acquisition even if interface already has an address
+    -f - force acquire even if interface already has an address
 
         Normally dora will refuse to request an IP address if the interface
         already has one, use -f to make it try anyway. Note this may invalidate
@@ -148,29 +76,13 @@ Options:
     -h hostname - request specific hostname
 
         Some DHCP servers will register the specified hostname with the local
-        DNS server, so that it will resolve to the assigned IP. Some won't.
+        DNS server, so that it will resolve to the assigned IP. Some won't,
         YMMV.
 
-    -i - elicit local network information for current interface address.
+    -m - output address in CIDR notation, i.e. with appended netmask width
 
-        This can be used to obtain DHCP information for a static IP address,
-        without actually leasing the address. If the address actually is
-        assigned by DHCP, the server may choose to populate the lease field
-        with the remaining time. Or not.
-
-    -l - renew the lease for the current interface address, requires -s
-
-        Renew the current lease. This is typically performed at time T1 (lease
-        * 0.5 seconds). The DHCP server address is required. Add -c to renew
-        * some other address, but note if the interface doesn't have that
-        address then the response may not be received.
-
-    -L - rebind the lease for the current interface address
-
-        If renew fails for some reason, the rebind is sent at time T2 (lease *
-        0.875 seconds). This is broadcast so the server address isn't required.
-        If the rebind fails, then the interface is supposed to be de-configured
-        when the lease expires. Add -c to rebind some other address.
+        The resulting address is therefore compatible with 'ip address add' for
+        example.
 
     -o number - request DHCP option 1 to 254, can used multple times, implies -x
 
@@ -184,69 +96,49 @@ Options:
         This is simply shorthand for "-o1 -o2 -o3..." etc, an easy way to probe
         a server for optionms it supports. Useful with -d.
 
-    -r - release the lease for the current interface address, requires -s
+     -t number - transaction timeout seconds, default is 4
 
-        Attempts to release the lease for the current address. -s is required,
-        but the server won't respond. Add -c to release some other address.
+     -u number - max transaction attempts, default is 4
 
-     -s ipaddress - unicast to DHCP server address.
-
-        Used with various operations that require knowledge of the target DHCP
-        server. The interface must already be configured with an IP address in
-        order for unicast to work.
-
-     -t number - initial receive timeout seconds, default is 4
-
-     -u number - transmit attempts, default is 4
-
-        This defines how many times to resend a DHCPREQUEST if an ACK is not
-        received. Note each attempt extends the timeout by about one second
-        (randomized), so "-t 4 -u 4" will timeout after about 22 seconds, "-t 4
-        -u 5" will timeout after about 30 seconds, etc.
+        These define how often and how many times to send a request if an ack
+        is not received. Each attempt extends the timeout by about one second,
+        plus/minus up to 1000 random milliseconds, so "-t 4 -u 4" will timeout
+        after about 22 seconds, "-t 4 -u 5" will timeout after about 30
+        seconds, etc.
 
      -v - dump various status messages and other information to stderr
 
-        Includes dump of the sent as received packets, explanation as to why
-        packets are rejected, etc. This information always goes to stderr so
-        will not interfere with scripted output processing.
+        Including packet dump, explanation as to why packets are rejected, etc.
+        This information always goes to stderr so as not to interfere with
+        scripted output processing.
 
-     -x - output extended result report to stdout, one DHCP option per line
-
-        This supercedes the single-line output format, and prints each received
-        DHCP option in the form:
+     -x - extended result report to stdout (instend the single line). The
+     extended report prints one DHCP option per line, in the order provided by
+     the host, in the form:
 
             option description: value
 
-        Where:
+         Where:
 
-            "option" is the decimal option number, as defined at
+            option is the decimal option number, as defined at
             https://tools.ietf.org/html/rfc2132.
 
-            "description" is arbitrary text from that RFC, guaranteed to not
+            description is arbitrary text from that RFC, guaranteed to not
             contains spaces.
 
-            "value" is a stringified version of whatever was provided by the
+            value is a stringified version of whatever was provided by the
             server for the option, such as an IP address, a decimal value, or
-            an arbitrary string. Note that strings may contain whitespace, or
-            may even be empty, but control characters and non-ASCII weirdness
-            will be replaced with '?'.
+            an arbitrary string. Note that the value may contain whitespace, or
+            may even be empty, but will not control characters or non-ASCII
+            weirdness.
 
-        Option code 0 is used to present the assigned IP address. 0 is not an
-        actual DHCP option code so this allows all lines the have the same
-        format.
+        Option code 0 is used to present the assigned IP address. This is an
+        invalid RFC2132 option, but allows all lines to have the same format.
 
-        Some options are mandatory for normal operation, specifically the
-        subnet, broadcast, router, domain name server, domain name, and lease
-        time. If the server fails to provide these then dora will attempt
-        synthesize them. Synthesized options are indicated by an exclamation
-        point as the first character of the extended description.
+        For example:
 
-        For example, the expanded version of the DHCPINFORM reponse shown
-        above, with all options:
-
-            $ ./dora -iOx eth0
+            $ ./dora -xO inform eth0
             0 Address: 192.168.1.117
-            51 !IP_Address_Lease_Seconds: 0
             53 DHCP_Response_Type: 5
             54 Server_Identifier: 192.168.1.254
             1 Subnet_Mask: 255.255.254.0
@@ -257,10 +149,12 @@ Options:
             15 Domain_Name: localdomain
             3 Router: 192.168.0.1
 
-        This is all the options provided by the server, in this case including
-        option 252 which is not defined by the spec. A DHCPINFORM reply usually
-        won't include lease seconds, so this entry was synthesized.
+        Note option 252 was reported by the server but is not defined by
+        RF2132. An inform reply usually won't include lease seconds, so these
+        don't appear in the extended output (in the brief output it would
+        appear as 0).
 
-Just run 'make' to build the dora executable, it should be about 27K bytes.
-'make terse' removes the -v option and the DHCP option text (leaving only the
-':' in the output), this shrinks the executable to about 19K bytes.
+To build the dora executable, just run 'make'. The result should be about 27K
+bytes. 'make terse' removes help text, the -v option and the DHCP option text
+(leaving only the ':' in extended output), this shrinks the executable to about
+19K bytes.
