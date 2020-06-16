@@ -1,3 +1,61 @@
+// MIT License
+//
+// Copyright (c) 2020 Rich Leggitt
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+#ifdef TERSE
+#define usage() die("Usage: dora [options] [command [server]] interface\n")
+#else
+#define usage() die("\
+Usage:\n\
+\n\
+    dora [options] [command [server]] interface\n\
+\n\
+Perform a DHCP transaction on specified interface and print the result to\n\
+stdout.\n\
+\n\
+Commands are:\n\
+    acquire             - perform normal DHCP transaction\n\
+    renew <serverip>    - renew an existing lease with specified server\n\
+    rebind              - rebind an existing lease\n\
+    release <server>    - release an existing lease\n\
+    inform              - attempt to elicit information about a statically assigned IP\n\
+    probe               - print information about all servers on the subnet, for test\n\
+\n\
+Options are:\n\
+\n\
+    -c ipaddress        - request client address\n\
+    -f                  - force acquire even if interface already has an address\n\
+    -h hostname         - request specific hostname\n\
+    -m                  - output the address in CIDR notation, i.e. with appended netmask width\n\
+    -o number           - request DHCP option 1 to 254, can used multple times, implies -x\n\
+    -O                  - request all 254 possible DHCP options, implies -x\n\
+    -t number           - transaction timeout seconds, default is 4\n\
+    -u number           - max transaction attempts, default is 4\n\
+    -v                  - dump various status messages and other information to stderr\n\
+    -x                  - output extended result report format, one DHCP option per line\n\
+\n\
+See the README for more information.\n\
+")
+#endif
+
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,42 +100,6 @@
 // warn if verbose
 bool verbose = false;
 #define debug(...) do { if (verbose) warn(__VA_ARGS__); } while(0)
-#endif
-
-#ifdef TERSE
-#define usage() die("Usage: dora [options] [command [server]] interface\n")
-#else
-#define usage() die("\
-Usage:\n\
-\n\
-    dora [options] [command [server]] interface\n\
-\n\
-Perform a DHCP transaction on specified interface and print the result to\n\
-stdout.\n\
-\n\
-Commands are:\n\
-    acquire             - perform normal DHCP transaction\n\
-    renew <serverip>    - renew an existing lease with specified server\n\
-    rebind              - rebind an existing lease\n\
-    release <server>    - release an existing lease\n\
-    inform              - attempt to elicit information about a statically assigned IP\n\
-    probe               - print information about all servers on the subnet, for test\n\
-\n\
-Options are:\n\
-\n\
-    -c ipaddress        - request client address\n\
-    -f                  - force acquire even if interface already has an address\n\
-    -h hostname         - request specific hostname\n\
-    -m                  - output the address in CIDR notation, i.e. with appended netmask width\n\
-    -o number           - request DHCP option 1 to 254, can used multple times, implies -x\n\
-    -O                  - request all 254 possible DHCP options, implies -x\n\
-    -t number           - transaction timeout seconds, default is 4\n\
-    -u number           - max transaction attempts, default is 4\n\
-    -v                  - dump various status messages and other information to stderr\n\
-    -x                  - output extended result report format, one DHCP option per line\n\
-\n\
-See the README for more information.\n\
-")
 #endif
 
 #define BOOTPC 68
