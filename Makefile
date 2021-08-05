@@ -1,7 +1,9 @@
-override CFLAGS += -Wall -Werror -Os -s
+override CFLAGS += -Wall -Werror -Os -s -Wno-format-truncation
+
+default: dora
 
 dora: dora.c options.c bitarray.c
 
 clean:;rm dora
 
-terse:;$(MAKE) dora CFLAGS=-DTERSE
+terse:;$(MAKE) CFLAGS=-DTERSE

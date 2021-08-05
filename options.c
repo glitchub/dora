@@ -38,8 +38,8 @@
 #define debug(...) do { if (verbose) fprintf(stderr, __VA_ARGS__); } while(0)
 #endif
 
-// these are the types of dhcp option data fields
-// note all types are repesented for orthoganality but the unuseed types are commented out
+// these are the types of dhcp option data fields, note all types are
+// repesented for orthoganality but the unuseed types are commented out
 enum {
     opt_unused = 0,
     // opt_8,      // signed 8-bit value

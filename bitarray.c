@@ -63,8 +63,8 @@ int bitarray_numset(bitarray *b)
     return b->numset;
 }
 
-// Given a bit number, the next highest set bit (or that bit, if it's set).
-// Or return -1 if none.
+// Given a bit number, return that bit if it's set, else the number of the next
+// highest set bit. Or return -1 if none.
 int bitarray_next(bitarray *b, unsigned bit)
 {
     if (bit >= b->bits || !b->numset) return -1;
