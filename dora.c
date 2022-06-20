@@ -344,7 +344,7 @@ int transact(int sock, bool dosend, struct packet *send, struct packet **recv, i
         uint32_t to = send->server ?: 0xFFFFFFFF;
         if (verbose)
         {
-            warn("Sending %ld-byte packet to %u.%u.%u.%u:\n", DHCP_SIZE + send->optsize, quad(&to));
+            warn("Sending %zu-byte packet to %u.%u.%u.%u:\n", DHCP_SIZE + send->optsize, quad(&to));
             dump((uint8_t *)&send->dhcp, DHCP_SIZE+send->optsize);
             printf("ciaddr=%u.%u.%u.%u yiaddr=%u.%u.%u.%u siaddr=%u.%u.%u.%u\n", quad(&send->dhcp.ciaddr), quad(&send->dhcp.yiaddr), quad(&send->dhcp.siaddr));
         }
